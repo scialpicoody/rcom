@@ -63,8 +63,9 @@ impl PortManager {
 
         let id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
         // Publish the open state before the session's forwarder can deliver data,
-        // so the log reads "opened" before any RX rows of the new session.
-        self.publish_port(id, name, PortState::Open, None);
+        // so the log reads "opened" before any RX rows of the new session. The baud
+        // rides along: the reconnect machine re-opens with the user's config.
+        self.publish_port(id, name, PortState::Open, None, Some(config.baud_rate));
         let session = Session::spawn(id, name.to_string(), opened, config, self.bus.clone());
         *current = Some(session);
 
@@ -73,10 +74,17 @@ impl PortManager {
     }
 
     /// Closes the current session, if any. Never hangs: see [`Session::close`].
+    ///
+    /// Publishes the terminal [`PortState::Closed`] itself: the session's forwarder
+    /// has already ended when the session died earlier (mid-stream error), so the
+    /// explicit event is what tells the reconnect machine (and the UI) that the
+    /// *user* closed — the disarm condition of auto-reconnect.
     pub async fn close(&self) {
         let mut current = self.session.lock().await;
         if let Some(session) = current.take() {
+            let (id, port) = (session.id, session.port.clone());
             session.close().await;
+            self.publish_port(id, &port, PortState::Closed, None, None);
         }
     }
 
@@ -98,13 +106,14 @@ impl PortManager {
         Ok(())
     }
 
-    fn publish_port(&self, id: u64, port: &str, state: PortState, detail: Option<String>) {
+    fn publish_port(&self, id: u64, port: &str, state: PortState, detail: Option<String>, baud: Option<u32>) {
         self.bus.publish(Event::Port(PortEvent {
             session_id: id,
             port: port.to_string(),
             state,
             detail,
             timestamp: chrono::Local::now(),
+            baud,
         }));
     }
 }

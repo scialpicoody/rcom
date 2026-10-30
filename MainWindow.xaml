@@ -11,7 +11,7 @@
              FontSize="13" />
 
     <Grid Grid.Row="1"
-          ColumnDefinitions="Auto,Auto,Auto,Auto,*,Auto"
+          ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,*,Auto"
           Margin="0,8,0,0">
       <ComboBox x:Name="PortSelector"
                 Grid.Column="0"
@@ -30,11 +30,17 @@
               Content="Open"
               MinWidth="80"
               Margin="0,0,12,0" />
+      <!-- The hide-sent filter: view-only (contract §2.1 — presentation options are
+           viewmodel state); the log store and auto-save file stay complete. -->
+      <CheckBox x:Name="HideSentToggle"
+                Grid.Column="4"
+                Content="Hide sent"
+                Margin="0,0,12,0" />
       <TextBox x:Name="SendBox"
-               Grid.Column="4"
+               Grid.Column="5"
                Margin="0,0,6,0" />
       <Button x:Name="SendButton"
-              Grid.Column="5"
+              Grid.Column="6"
               Content="Send"
               MinWidth="90" />
     </Grid>

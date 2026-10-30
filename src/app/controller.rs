@@ -11,10 +11,10 @@ use ferroui_base::controls::NameScopeExtensions;
 use ferroui_base::input::Key;
 use ferroui_base::threading::{DispatcherPriority, DispatcherTimer};
 use ferroui_base::{BoxedValue, Ref, StyledElement};
-use ferroui_controls::{Button, ComboBox, ListBox, TextBox};
+use ferroui_controls::{Button, CheckBox, ComboBox, ListBox, TextBox};
 
 use super::host::{core_host, Command, UiMsg};
-use rcom::core::bus::PortState;
+use rcom::core::bus::{Direction, PortState};
 use rcom::core::port::PortInfo;
 
 
@@ -29,17 +29,30 @@ const ROW_CAP: usize = 5000;
 /// How often the UI pumps messages from the core driver.
 const PUMP_INTERVAL: Duration = Duration::from_millis(30);
 
+/// One log row of the view model: the rendered text plus the direction it shows
+/// (`None` for status/diagnostic lines). The log *view* is a filtered render of
+/// these rows (the hide-sent toggle); the core's log store and the auto-save file
+/// stay complete — the UI↔Core contract's "presentation options are viewmodel
+/// state, never core state".
+struct Row {
+    direction: Option<Direction>,
+    text: String,
+}
+
 pub struct MainController {
     port_selector: Ref<ComboBox>,
     baud_selector: Ref<ComboBox>,
     open_close: Ref<Button>,
     refresh_button: Ref<Button>,
+    hide_sent: Ref<CheckBox>,
     send_box: Ref<TextBox>,
     send_button: Ref<Button>,
     log: Ref<ListBox>,
     ports: RefCell<Vec<PortInfo>>,
     is_open: Cell<bool>,
-    row_count: Cell<usize>,
+    /// Whether TX rows are filtered from the view (the store/file stay complete).
+    hide_sent_on: Cell<bool>,
+    rows: RefCell<Vec<Row>>,
 }
 
 impl MainController {
@@ -54,12 +67,14 @@ impl MainController {
             baud_selector: NameScopeExtensions::get(element, "BaudSelector"),
             open_close: NameScopeExtensions::get(element, "OpenCloseButton"),
             refresh_button: NameScopeExtensions::get(element, "RefreshButton"),
+            hide_sent: NameScopeExtensions::get(element, "HideSentToggle"),
             send_box: NameScopeExtensions::get(element, "SendBox"),
             send_button: NameScopeExtensions::get(element, "SendButton"),
             log: NameScopeExtensions::get(element, "LogList"),
             ports: RefCell::new(Vec::new()),
             is_open: Cell::new(false),
-            row_count: Cell::new(0),
+            hide_sent_on: Cell::new(false),
+            rows: RefCell::new(Vec::new()),
         });
 
         this.fill_baud_selector();
@@ -104,7 +119,7 @@ impl MainController {
             .get(index.max(0) as usize)
             .map(|info| info.name.clone());
         let Some(port) = port else {
-            self.append_row("## select a port first".into());
+            self.append_row(None, "## select a port first".into());
             return;
         };
         core_host().commands
@@ -128,29 +143,81 @@ impl MainController {
     }
 
     fn set_open_state(&self, state: PortState) {
-        self.is_open.set(state == PortState::Open);
-        let label = if self.is_open.get() { "Close" } else { "Open" };
+        // A session being watched is still alive from the UI's point of view:
+        // `close()` must stay available to cancel the auto-reconnect (contract §3:
+        // `WatchDesired → Closed | user close()`). The hotplug poller's global
+        // Arrived/Removed events never touch the button.
+        let active = matches!(
+            state,
+            PortState::Open | PortState::Reopened | PortState::WatchDesired
+        );
+        self.is_open.set(active);
+        let label = if active { "Close" } else { "Open" };
         self.open_close.set_content(Some(Rc::new(label.to_string())));
     }
 
-    fn append_row(&self, row: String) {
+    /// The hide-sent checkbox flipped: remember the filter and re-render the view
+    /// from the row view model. TX rows vanish from the *view* only.
+    fn set_hide_sent(&self) {
+        self.hide_sent_on.set(self.hide_sent.is_checked() == Some(true));
+        self.render_rows();
+    }
+
+    /// Whether a row is visible under the current filter.
+    fn visible(row: &Row, hide_sent: bool) -> bool {
+        !(hide_sent && row.direction == Some(Direction::Tx))
+    }
+
+    /// Rebuilds the log list from the view model under the current filter.
+    fn render_rows(&self) {
+        let hide_sent = self.hide_sent_on.get();
         let items = self.log.items();
-        let value: BoxedValue = Rc::new(row);
-        items.add(Some(value));
-        let count = self.row_count.get() + 1;
-        if count > ROW_CAP {
-            items.remove_at(0);
-            self.row_count.set(count - 1);
-        } else {
-            self.row_count.set(count);
+        items.clear();
+        let rows = self.rows.borrow();
+        for row in rows.iter().filter(|row| Self::visible(row, hide_sent)) {
+            let value: BoxedValue = Rc::new(row.text.clone());
+            items.add(Some(value));
         }
-        // Auto-scroll to the newest row (virtualization makes this cheap).
-        self.log.scroll_into_view(self.log.item_count() - 1);
+        drop(rows);
+        self.scroll_to_newest();
+    }
+
+    fn append_row(&self, direction: Option<Direction>, text: String) {
+        let hide_sent = self.hide_sent_on.get();
+        let row = Row {
+            direction,
+            text: text.clone(),
+        };
+        let show = Self::visible(&row, hide_sent);
+
+        let mut rows = self.rows.borrow_mut();
+        // Rotate the view model past the cap; a rotated-out row leaves the list
+        // with it (only when it was visible — hidden rows never entered the list).
+        if rows.len() >= ROW_CAP {
+            let rotated = rows.remove(0);
+            if Self::visible(&rotated, hide_sent) {
+                self.log.items().remove_at(0);
+            }
+        }
+        rows.push(row);
+        drop(rows);
+        if show {
+            let value: BoxedValue = Rc::new(text);
+            self.log.items().add(Some(value));
+            self.scroll_to_newest();
+        }
+    }
+
+    fn scroll_to_newest(&self) {
+        let count = self.log.item_count();
+        if count > 0 {
+            self.log.scroll_into_view(count - 1);
+        }
     }
 
     fn apply(&self, message: UiMsg) {
         match message {
-            UiMsg::Row(row) => self.append_row(row),
+            UiMsg::Row { text, direction } => self.append_row(direction, text),
             UiMsg::Ports(ports) => self.show_ports(ports),
             UiMsg::PortState(state) => self.set_open_state(state),
         }
@@ -193,6 +260,12 @@ fn wire_events(this: &Rc<MainController>) {
     this.refresh_button.add_handler(Button::click_event(), {
         let this = Rc::clone(this);
         move |_, _| this.refresh_ports()
+    });
+
+    // The hide-sent toggle re-renders the view (TX rows filtered out).
+    this.hide_sent.is_checked_changed({
+        let this = Rc::clone(this);
+        move |_, _| this.set_hide_sent()
     });
 
     this.send_button.add_handler(Button::click_event(), {

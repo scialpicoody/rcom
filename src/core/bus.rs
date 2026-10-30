@@ -56,6 +56,12 @@ pub struct DataEvent {
     pub bytes: Payload,
 }
 
+/// The `session_id` of process-global port events — the hotplug poller's
+/// arrival/removal notices, which belong to no session (the UI↔Core contract §1.2
+/// renders its `session_id: Option<SessionId>` on #15's non-optional id this way:
+/// `0` is global; real sessions start at 1).
+pub const GLOBAL_SESSION_ID: u64 = 0;
+
 /// The lifecycle state of a session's port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortState {
@@ -64,6 +70,17 @@ pub enum PortState {
     /// The session died on an error (unplug, driver failure). A later ticket's
     /// reconnect state machine watches for these (docs/design.md, "Serial layer").
     Error,
+    /// The session died while it should be open: the reconnect machine is polling
+    /// for the same port (name + VID/PID) to reappear (design.md, "Serial layer").
+    WatchDesired,
+    /// The reconnect machine re-opened the port automatically; the session is
+    /// [`PortState::Open`] again.
+    Reopened,
+    /// Process-global (`session_id == GLOBAL_SESSION_ID`): the hotplug poller saw
+    /// a port appear (UI↔Core contract §1, `PortEvent::Arrived`).
+    Arrived,
+    /// Process-global: the hotplug poller saw a port disappear.
+    Removed,
 }
 
 /// A port lifecycle event of a session.
@@ -75,6 +92,10 @@ pub struct PortEvent {
     /// Error detail for [`PortState::Error`], or a human note otherwise.
     pub detail: Option<String>,
     pub timestamp: DateTime<Local>,
+    /// The baud rate of the session for [`PortState::Open`] / [`PortState::Reopened`]
+    /// (the reconnect machine re-opens with the same config the user chose); `None`
+    /// for events that carry no open configuration.
+    pub baud: Option<u32>,
 }
 
 /// The severity of a [`LogEvent`].
