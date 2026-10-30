@@ -35,6 +35,11 @@ ferroui-desktop = { version = "=0.4.0-preview.1" }
 # also uncomment `attach_dev_tools` in src/main.rs):
 # ferroui-diagnostics = { version = "=0.4.0-preview.1" }
 ferroui-themes-winui = { version = "=0.4.0-preview.1" }
+# ISSUE #28 (shell candidates) — examples only, same exact pin. `desktop` pulls
+# `ferroui-themes-fluent` (a `launch` default we do not use; the shells pass the
+# WinUI theme to `launch_themed`). Cargo.toml is nominally another lane's file:
+# this line is the only edit, and only the examples use the crate.
+ferroui-view = { version = "=0.4.0-preview.1", features = ["desktop"] }
 
 [build-dependencies]
 ferroui-build = { version = "=0.4.0-preview.1" }
