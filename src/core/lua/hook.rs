@@ -73,7 +73,8 @@ pub fn run_send_convert(script: &str, input: &[u8]) -> mlua::Result<Vec<u8>> {
 }
 
 /// A pre-send hook installed on a session: transforms every outgoing chunk
-/// (`return uartData:fromHex()` shape). Stub for #19 to adopt.
+/// (`return uartData:fromHex()` shape). #19 installs it on the port manager,
+/// whose `write` funnels through [`Self::apply`] while a hook is set.
 pub struct TxHook {
     script: String,
 }
@@ -83,6 +84,11 @@ impl TxHook {
         Self {
             script: script.into(),
         }
+    }
+
+    /// The conversion script this hook runs (for status rows and diagnostics).
+    pub fn script(&self) -> &str {
+        &self.script
     }
 
     /// Transforms `input` through the hook script. Errors carry the Lua failure
