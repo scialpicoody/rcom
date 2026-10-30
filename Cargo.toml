@@ -43,7 +43,7 @@ ferroui-view = { version = "=0.4.0-preview.1", features = ["desktop"] }
 
 # The core (src/core): the UI-agnostic serial engine. Only what the serial tracer
 # bullet needs; later slices add their own (rumqttc, rustls, encoding_rs, ...).
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 # ISSUE #18 — the Lua engine (docs/design.md, "Lua layer"). `lua53` because llcom
 # runs xlua (Lua 5.3 semantics) and llcom scripts must run unmodified; `vendored`
 # builds the interpreter from source; `send` makes `Lua` Send+Sync so tokio timer
@@ -66,6 +66,16 @@ serde = { version = "1", features = ["derive"] }
 # Ticket #16: the log store's default directory (platform config/data dir);
 # API-compatible with #17's `dirs` usage.
 dirs = "7.0.0"
+# ISSUE #20 — the net tools (docs/design.md, stack table): TCP/UDP/TLS server+client
+# channels over tokio; TLS via rustls on the `ring` provider (the whole TLS stack
+# shares one provider; aws-lc-rs pulls a C toolchain for no gain here), self-signed
+# certificates generated on demand via rcgen. `webpki-roots` backs standard
+# verification; the tools-page "accept any certificate" toggle is the documented
+# debugging-tool escape hatch (llcom parity).
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "0.26"
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 
 [build-dependencies]
 ferroui-build = { version = "=0.4.0-preview.1" }

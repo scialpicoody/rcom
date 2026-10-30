@@ -198,6 +198,10 @@ impl LuaRuntime {
             sink,
         });
         install_host_api(&lua, Arc::clone(&inner))?;
+        // The `rcom.net` one-shot table (issue #20), next to the api* builtins.
+        // Functions resolve the process-global net hub lazily; without one they
+        // still run (one-shots are hub-independent).
+        crate::core::nettools::lua_api::install(&lua)?;
 
         // Script VMs announce themselves, then head.lua sets up print/log/sys/…
         lua.globals().set("runType", "script")?;

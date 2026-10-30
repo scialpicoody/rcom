@@ -174,6 +174,38 @@ impl LogStore {
                     out.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
                 ));
             }
+            Event::Net(net) => {
+                // Net tools traffic joins the session file with the tools' own
+                // marker, so the durable record covers the tools page's work
+                // (issue #20). Data chunks carry no serial-direction bytes, so
+                // the ring buffer stays serial-only.
+                let line = match &net.kind {
+                    crate::core::nettools::NetEventKind::Listening { local } => {
+                        format!("==  [net#{}] listening on {local}", net.channel_id)
+                    }
+                    crate::core::nettools::NetEventKind::Connected { remote } => {
+                        format!("==  [net#{}] connected to {remote}", net.channel_id)
+                    }
+                    crate::core::nettools::NetEventKind::Disconnected { .. } => {
+                        format!("==  [net#{}] closed", net.channel_id)
+                    }
+                    crate::core::nettools::NetEventKind::Error { message } => {
+                        format!("!!  [net#{}] error: {message}", net.channel_id)
+                    }
+                    crate::core::nettools::NetEventKind::Data { direction, remote, bytes } => {
+                        let tag = match direction {
+                            crate::core::nettools::NetDirection::Rx => "RX",
+                            crate::core::nettools::NetDirection::Tx => "TX",
+                        };
+                        format!("{tag}  [net#{}] {remote}  {}", net.channel_id,
+                            crate::core::codec::hex_spaced(bytes.as_slice()))
+                    }
+                };
+                self.write_line(format!(
+                    "{}  ~~  {line}",
+                    net.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
+                ));
+            }
         }
     }
 
