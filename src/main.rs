@@ -2,18 +2,25 @@
 //!
 //! ```text
 //! cargo run
-//! FERROUI_SMOKE_EXIT_MS=2000 cargo run
+//! FERROUI_SMOKE_EXIT_MS=3000 RCOM_AUTODEMO=1 cargo run
 //! cargo build --profile dist
 //! ```
 //!
 //! With `FERROUI_SMOKE_EXIT_MS=<n>` the main window is closed after `n` milliseconds, which
-//! ends the main loop.
+//! ends the main loop. With `RCOM_AUTODEMO=1` the app drives its own demo path: it
+//! opens the mock port `MOCK0`, sends `ping` and logs the echo (see `src/app/host.rs`).
 
 use rcom::App;
 use ferroui_controls::AppBuilder;
 use ferroui_desktop::AppBuilderDesktopExtensions;
 
 fn main() -> std::process::ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let exit_code = AppBuilder::configure::<App>()
         .use_platform_detect()

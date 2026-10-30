@@ -1,6 +1,9 @@
 //! The class of the document `App.xaml`: the application, whose main window is the window
 //! of `MainWindow.xaml`.
 
+pub(crate) mod controller;
+mod host;
+
 use crate::main_window::MainWindow;
 use ferroui_base::{
     ferro_class, ferro_class_info, ferro_impl_classes, instantiate, FerroObjectImpl, Ref,

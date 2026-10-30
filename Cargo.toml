@@ -36,5 +36,15 @@ ferroui-desktop = { version = "=0.4.0-preview.1" }
 # ferroui-diagnostics = { version = "=0.4.0-preview.1" }
 ferroui-themes-winui = { version = "=0.4.0-preview.1" }
 
+# The core (src/core): the UI-agnostic serial engine. Only what the serial tracer
+# bullet needs; later slices add their own (mlua, rumqttc, rustls, encoding_rs, ...).
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+serialport = "4"
+chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+
 [build-dependencies]
 ferroui-build = { version = "=0.4.0-preview.1" }

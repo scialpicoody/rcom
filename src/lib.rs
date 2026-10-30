@@ -8,6 +8,8 @@
 // The compiled markup of a document names the types of this crate by the name of the crate.
 extern crate self as rcom;
 
+pub mod core;
+
 mod app;
 mod main_window;
 mod register_types;
