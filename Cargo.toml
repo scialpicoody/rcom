@@ -1,0 +1,40 @@
+[package]
+name = "rcom"
+description = "a serial tool write in rust with lua"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+authors = ["pony <trans-bug@outlook.com>"]
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rcom"
+path = "src/main.rs"
+
+
+# The build that is shipped: whole-program optimisation, symbols stripped
+# (`cargo build --profile dist`).
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+# Every FerroUI crate of a release is pinned to the same exact version, so that the crates
+# of the release are only ever resolved together.
+[dependencies]
+ferroui-base = { version = "=0.4.0-preview.1" }
+ferroui-controls = { version = "=0.4.0-preview.1" }
+ferroui-markup-xaml = { version = "=0.4.0-preview.1" }
+ferroui-desktop = { version = "=0.4.0-preview.1" }
+# The developer tools on F12 in debug builds (uncomment once ferroui-diagnostics publishes;
+# also uncomment `attach_dev_tools` in src/main.rs):
+# ferroui-diagnostics = { version = "=0.4.0-preview.1" }
+ferroui-themes-winui = { version = "=0.4.0-preview.1" }
+
+[build-dependencies]
+ferroui-build = { version = "=0.4.0-preview.1" }
