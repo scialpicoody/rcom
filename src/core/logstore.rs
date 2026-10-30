@@ -20,7 +20,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Local};
 use tokio::sync::Mutex;
 
-use crate::core::bus::{Direction, Event, EventBus, LogLevel, PortState};
+use crate::core::bus::{Direction, Event, EventBus, LogLevel, PortState, ScriptOutKind};
 
 /// How many raw records the ring buffer keeps (llcom-class scrollback; the file
 /// sink is the unlimited durable copy).
@@ -159,6 +159,19 @@ impl LogStore {
                     "{}  {level}  {}",
                     log.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),
                     log.message
+                ));
+            }
+            Event::ScriptOut(out) => {
+                // Script output joins the session file with the UI's `~~` marker
+                // (prints verbatim, errors flagged) — it is part of the session's
+                // record, though it carries no wire bytes for the ring buffer.
+                let line = match &out.kind {
+                    ScriptOutKind::Print { line } => line.clone(),
+                    ScriptOutKind::Error { message } => format!("!! script error: {message}"),
+                };
+                self.write_line(format!(
+                    "{}  ~~  {line}",
+                    out.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
                 ));
             }
         }

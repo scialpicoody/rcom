@@ -7,6 +7,8 @@
 //! - [`error`]: the core error type.
 //! - [`logstore`]: the session log — ring buffer of raw records plus a timestamped
 //!   auto-save file sink.
+//! - [`lua`]: the Lua runtime (llcom `sys.*` compatibility) whose output reaches the
+//!   bus as script events.
 //! - [`port`]: the serial layer — the [`port::SerialBackend`] trait, the real
 //!   `serialport` implementation, the mock backend, the manager/session handles
 //!   the UI drives, the reconnect state machine and the hotplug poller.
@@ -15,7 +17,10 @@ pub mod bus;
 pub mod codec;
 pub mod error;
 pub mod logstore;
+pub mod lua;
 pub mod port;
 
-pub use bus::{Event, EventBus, LogEvent, LogLevel, PortEvent, PortState};
+pub use bus::{
+    Event, EventBus, LogEvent, LogLevel, PortEvent, PortState, ScriptOutEvent, ScriptOutKind,
+};
 pub use error::{CoreError, Result};
