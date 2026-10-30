@@ -16,8 +16,9 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use rcom::core::bus::{DataEvent, Direction, Event, LogEvent, LogLevel, PortEvent, PortState};
+use rcom::core::bus::{DataEvent, Direction, Event, LogEvent, LogLevel, PortEvent, PortState, ScriptOutEvent, ScriptOutKind};
 use rcom::core::codec::{hex_spaced, lossy_utf8};
+use rcom::core::lua::{LuaRuntime, UartSink};
 use rcom::core::port::manager::PortManager;
 use rcom::core::port::mock::{MockBackend, MOCK_PORT_NAME};
 use rcom::core::port::serial::SerialPortBackend;
@@ -102,8 +103,13 @@ async fn driver(
 ) {
     // The demo path: open MOCK0 and send `ping`; the mock echoes it back as RX.
     let mut awaiting_echo = false;
-    if autodemo_enabled() {
-        tracing::info!("RCOM_AUTODEMO=1: driving the MOCK0 demo path");
+    let luademo = luademo_enabled();
+    if autodemo_enabled() || luademo {
+        if luademo {
+            tracing::info!("RCOM_LUADEMO=1: driving the Lua demo (llcom sample on MOCK0)");
+        } else {
+            tracing::info!("RCOM_AUTODEMO=1: driving the MOCK0 demo path");
+        }
         let demo = commands_tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -113,13 +119,18 @@ async fn driver(
         });
     }
 
+    // RCOM_LUADEMO: one script VM on the MOCK0 session, running llcom's README
+    // sample (uartReceive → publish → task replies "ok!", plus a 1s loop timer).
+    let mut script_vm: Option<LuaRuntime> = None;
+    let mut script_vm_fed = false;
+
     let mut events = bus.subscribe();
     loop {
         tokio::select! {
             command = commands.recv() => match command {
                 None => break, // the host is gone: app shutting down
                 Some(command) => {
-                    if autodemo_enabled() {
+                    if autodemo_enabled() || luademo {
                         if let Command::SendText(text) = &command {
                             if text == "ping" {
                                 awaiting_echo = true;
@@ -145,6 +156,31 @@ async fn driver(
                             );
                         }
                     }
+                    // Lua demo: boot the sample VM as soon as MOCK0 is open; feed
+                    // it exactly one RX chunk (the `ping` echo) — its own `ok!`
+                    // reply comes back as RX too, and feeding that would loop.
+                    if luademo {
+                        if script_vm.is_none() {
+                            if let Event::Port(port) = &event {
+                                if port.state == PortState::Open && port.port == MOCK_PORT_NAME {
+                                    script_vm = start_demo_vm(&manager, bus.clone(), port.session_id, &ui);
+                                    
+                                }
+                            }
+                        }
+                        if !script_vm_fed {
+                            if let (Some(vm), Event::Data(data)) = (&script_vm, &event) {
+                                if data.direction == Direction::Rx {
+                                    script_vm_fed = true;
+                                    let vm = vm.clone();
+                                    let bytes = data.bytes.as_slice().to_vec();
+                                    tokio::spawn(async move {
+                                        vm.feed_uart(&bytes);
+                                    });
+                                }
+                            }
+                        }
+                    }
                     if let Event::Port(port) = &event {
                         // The state reaches the button, the row the log view.
                         if ui.send(UiMsg::PortState(port.state)).is_err() {
@@ -163,6 +199,49 @@ async fn driver(
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
+        }
+    }
+    // The VM is dropped with the driver; its timers abort and the tokio runtime
+    // shuts down with the process.
+    if let Some(vm) = script_vm {
+        vm.stop();
+    }
+}
+
+/// The script VM backing the `RCOM_LUADEMO` run: llcom's README sample, with
+/// `apiSend("uart")` wired to the port manager's write path. Failures become log
+/// rows (never panics).
+fn start_demo_vm(
+    manager: &Arc<PortManager>,
+    bus: EventBus,
+    session_id: u64,
+    ui: &std::sync::mpsc::Sender<UiMsg>,
+) -> Option<LuaRuntime> {
+    /// Bridges the VM's uart channel to the session writer.
+    struct DemoSink(Arc<PortManager>);
+
+    impl UartSink for DemoSink {
+        fn send_uart(&self, bytes: Vec<u8>) -> bool {
+            let manager = Arc::clone(&self.0);
+            tokio::spawn(async move {
+                if let Err(error) = manager.write(bytes).await {
+                    tracing::warn!("script uart send failed: {error}");
+                }
+            });
+            true
+        }
+    }
+
+    match LuaRuntime::start(
+        bus,
+        Some(session_id),
+        Some(Arc::new(DemoSink(Arc::clone(manager)))),
+        rcom::core::lua::scripts::LLCOM_README_SAMPLE,
+    ) {
+        Ok(vm) => Some(vm),
+        Err(error) => {
+            let _ = ui.send(UiMsg::Row(format!("!! lua demo failed: {error}")));
+            None
         }
     }
 }
@@ -198,6 +277,7 @@ pub fn render_event(event: &Event) -> Option<String> {
         Event::Data(data) => Some(format_data_row(data)),
         Event::Port(port) => Some(format_port_row(port)),
         Event::Log(log) => Some(format_log_row(log)),
+        Event::ScriptOut(out) => Some(format_script_row(out)),
     }
 }
 
@@ -256,6 +336,16 @@ pub fn format_log_row(log: &LogEvent) -> String {
         level,
         log.message
     )
+}
+
+/// Script rows are marked `~~` so they read apart from wire traffic: `print` /
+/// `log.*` verbatim (llcom's own "[I]-[tag] message" shape), errors prefixed.
+pub fn format_script_row(out: &ScriptOutEvent) -> String {
+    let stamp = out.timestamp.format("%H:%M:%S%.3f");
+    match &out.kind {
+        ScriptOutKind::Print { line } => format!("{stamp}  ~~  {line}"),
+        ScriptOutKind::Error { message } => format!("{stamp}  ~~  !! script error: {message}"),
+    }
 }
 
 #[cfg(test)]
@@ -347,10 +437,47 @@ mod tests {
         }))
         .is_some());
     }
+
+    /// Script output renders as its own row kind: prints verbatim (llcom's
+    /// "[I]-[tag] message" shape survives), errors flagged — the AC's "script
+    /// errors surface in the log".
+    #[test]
+    fn script_rows_render_print_and_error() {
+        let print = format_script_row(&ScriptOutEvent {
+            session_id: Some(1),
+            timestamp: stamp(),
+            kind: ScriptOutKind::Print {
+                line: "[I]-[uartReceive]\thello".into(),
+            },
+        });
+        assert_eq!(print, "03:04:05.123  ~~  [I]-[uartReceive]\thello");
+
+        let error = format_script_row(&ScriptOutEvent {
+            session_id: None,
+            timestamp: stamp(),
+            kind: ScriptOutKind::Error {
+                message: "script error: boom".into(),
+            },
+        });
+        assert_eq!(error, "03:04:05.123  ~~  !! script error: script error: boom");
+
+        assert!(render_event(&Event::ScriptOut(ScriptOutEvent {
+            session_id: None,
+            timestamp: stamp(),
+            kind: ScriptOutKind::Print { line: "x".into() },
+        }))
+        .is_some());
+    }
 }
 
 fn autodemo_enabled() -> bool {
     std::env::var("RCOM_AUTODEMO").is_ok_and(|value| value == "1")
+}
+
+/// `RCOM_LUADEMO=1`: run llcom's README sample in a script VM against MOCK0 —
+/// its log/timer output shows up as `~~` rows in the log view (ticket #18 demo).
+fn luademo_enabled() -> bool {
+    std::env::var("RCOM_LUADEMO").is_ok_and(|value| value == "1")
 }
 
 /// Both backends, behind one list: the real ports of the machine plus the mock's
