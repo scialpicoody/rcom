@@ -196,6 +196,62 @@
                    FontSize="13" />
         </Grid>
       </TabItem>
+
+      <!-- The net tools page (ticket #20). The XAML carries no visible strings —
+           src/app/tools_net.rs sets every label from the i18n dictionaries and
+           wires the controls by these names. -->
+      <TabItem x:Name="NetToolsTab">
+        <Grid RowDefinitions="Auto,Auto,Auto,Auto,*" Margin="4">
+          <StackPanel Grid.Row="0"
+                      Orientation="Horizontal"
+                      Spacing="6">
+            <ComboBox x:Name="NetProtocolSelector"
+                      MinWidth="100" />
+            <ComboBox x:Name="NetModeSelector"
+                      MinWidth="90" />
+            <CheckBox x:Name="NetCertCheck"
+                      VerticalAlignment="Center" />
+          </StackPanel>
+
+          <StackPanel Grid.Row="1"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      Margin="0,6,0,0">
+            <TextBox x:Name="NetHostBox"
+                     MinWidth="170" />
+            <TextBox x:Name="NetPortBox"
+                     MinWidth="80" />
+            <Button x:Name="NetStartButton"
+                    MinWidth="90" />
+          </StackPanel>
+
+          <StackPanel Grid.Row="2"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      Margin="0,6,0,0">
+            <CheckBox x:Name="NetBridgeCheck"
+                      VerticalAlignment="Center" />
+            <TextBlock x:Name="NetStatus"
+                       FontSize="12"
+                       VerticalAlignment="Center" />
+          </StackPanel>
+
+          <StackPanel Grid.Row="3"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      Margin="0,6,0,0">
+            <TextBox x:Name="NetSendBox"
+                     MinWidth="260" />
+            <Button x:Name="NetSendButton"
+                    MinWidth="70" />
+          </StackPanel>
+
+          <ListBox x:Name="NetLog"
+                   Grid.Row="4"
+                   FontSize="12"
+                   Margin="0,6,0,0" />
+        </Grid>
+      </TabItem>
     </TabControl>
   </Grid>
 </Window>

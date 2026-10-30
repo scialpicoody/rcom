@@ -83,6 +83,9 @@ pub enum UiMsg {
     Data(DataRowMsg),
     /// Autodemo drives the encoding switch (the same code path as the selector).
     SetEncoding(TextEncoding),
+    /// A net-tools event (issue #20); the tools page consumes it and the row
+    /// text also lands in the main log view.
+    Net(rcom::core::nettools::NetEvent),
 }
 
 /// The process-wide handle the UI thread uses to reach the core. `ui_rx` is drained
@@ -128,6 +131,20 @@ fn start_engine() -> CoreHost {
                 let logstore = LogStore::start(default_log_dir(), &driver_bus);
                 hotplug::spawn(Arc::clone(&backend), driver_bus.clone());
                 reconnect::spawn(Arc::clone(&manager), driver_bus.clone());
+                // ISSUE #20: the process-global net hub (channels + bridge) and,
+                // when requested, the net autodemo beside the driver.
+                let net_hub = rcom::core::nettools::hub::init_global(
+                    driver_bus.clone(),
+                    Arc::clone(&manager),
+                );
+                if rcom::core::nettools::demo::NetDemoMode::from_env() != rcom::core::nettools::demo::NetDemoMode::Off
+                {
+                    tokio::spawn(rcom::core::nettools::demo::run(
+                        driver_bus.clone(),
+                        net_hub,
+                        Some(Arc::clone(&manager)),
+                    ));
+                }
                 driver(
                     manager,
                     driver_bus,
@@ -513,6 +530,19 @@ async fn driver(
                                 break; // UI gone
                             }
                         }
+                        // ISSUE #20: net events render one row into the main log
+                        // view (the session-log echo of the tools' traffic) and
+                        // go to the net tools page as their own message.
+                        Event::Net(net) => {
+                            let row = super::tools_net::format_net_row(net);
+                            tracing::debug!(target: "rcom::rows", "{row}");
+                            if ui.send(UiMsg::Row { text: row, direction: None }).is_err() {
+                                break; // UI gone
+                            }
+                            if ui.send(UiMsg::Net(net.clone())).is_err() {
+                                break; // UI gone
+                            }
+                        }
                         Event::Port(_) | Event::Log(_) | Event::ScriptOut(_) => {
                             if let Some(row) = render_event(&event) {
                                 tracing::debug!(target: "rcom::rows", "{row}");
@@ -717,13 +747,16 @@ async fn handle_command(
 }
 
 /// Turns a non-data bus event into the row the log view shows (data chunks travel
-/// to the UI as raw [`DataRowMsg`]s and are rendered there, per encoding).
+/// to the UI as raw [`DataRowMsg`]s and are rendered there, per encoding; net
+/// events are rendered in the driver's event arm — they carry their own row
+/// shape and also go to the tools page).
 pub fn render_event(event: &Event) -> Option<String> {
     match event {
         Event::Data(_) => None,
         Event::Port(port) => Some(format_port_row(port)),
         Event::Log(log) => Some(format_log_row(log)),
         Event::ScriptOut(out) => Some(format_script_row(out)),
+        Event::Net(_) => None,
     }
 }
 

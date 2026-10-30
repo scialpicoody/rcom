@@ -9,6 +9,10 @@
 //!   auto-save file sink.
 //! - [`lua`]: the Lua runtime (llcom `sys.*` compatibility) whose output reaches the
 //!   bus as script events.
+//! - [`nettools`]: the network tools (issue #20) — TCP/UDP/TLS server+client
+//!   channels with IPv6, the net⇄serial bridge, the `rcom.net` script API and
+//!   the `RCOM_NETDEMO` self-demo; channel events reach the bus as
+//!   [`bus::Event::Net`].
 //! - [`port`]: the serial layer — the [`port::SerialBackend`] trait, the real
 //!   `serialport` implementation, the mock backend, the manager/session handles
 //!   the UI drives, the reconnect state machine and the hotplug poller.
@@ -18,6 +22,7 @@ pub mod codec;
 pub mod error;
 pub mod logstore;
 pub mod lua;
+pub mod nettools;
 pub mod port;
 
 pub use bus::{

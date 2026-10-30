@@ -136,13 +136,18 @@ pub enum ScriptOutKind {
 }
 
 /// Everything that can happen in the engine. Later slices extend this enum
-/// (`ScriptOut`, net-tool events, ...); consumers must match with a catch-all arm.
+/// (MQTT, settings, ...); consumers must match with a catch-all arm.
 #[derive(Debug, Clone)]
 pub enum Event {
     Data(DataEvent),
     Port(PortEvent),
     Log(LogEvent),
     ScriptOut(ScriptOutEvent),
+    /// Net tools (issue #20): channel lifecycle and data of the TCP/UDP/TLS
+    /// instances (docs/ui-drafts/05-contract.md §1.5; the schema is owned and
+    /// refined by the nettools ticket). Bridged net RX leaves the bus towards
+    /// the port write path as a normal TX there.
+    Net(crate::core::nettools::NetEvent),
 }
 
 /// The sending half of the event bus. Clones subscribe new consumers through
@@ -232,6 +237,7 @@ mod tests {
                 Event::Log(log) => format!("log#{}", log.message),
                 Event::Port(_) => "port".into(),
                 Event::ScriptOut(_) => "script".into(),
+                Event::Net(_) => "net".into(),
             })
             .collect();
 

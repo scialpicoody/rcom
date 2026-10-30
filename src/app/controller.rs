@@ -186,6 +186,8 @@ impl MainController {
         this.fill_encoding_selector();
         MainController::setup_quick_send(&this);
         MainController::setup_script_page(&this);
+        // ISSUE #20 (one insertion point): the net tools page of the bottom pane.
+        super::tools_net::attach(element);
         wire_events(&this);
         start_pump(&this);
         MainController::autodemo_persist_check(&this);
@@ -844,6 +846,8 @@ impl MainController {
             UiMsg::Ports(ports) => self.show_ports(ports),
             UiMsg::PortState(state) => self.set_open_state(state),
             UiMsg::SetEncoding(encoding) => self.apply_set_encoding(encoding),
+            // ISSUE #20 (one insertion point): the net tools page consumes its events.
+            UiMsg::Net(net) => super::tools_net::apply_net(net),
         }
     }
 
