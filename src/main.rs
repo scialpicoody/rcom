@@ -15,6 +15,9 @@ use ferroui_controls::AppBuilder;
 use ferroui_desktop::AppBuilderDesktopExtensions;
 
 fn main() -> std::process::ExitCode {
+    // The i18n locale (RCOM_LANG, else the system locale, else English) before the
+    // first `t!` runs.
+    rcom::init_locale();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

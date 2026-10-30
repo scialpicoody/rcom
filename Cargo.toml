@@ -50,6 +50,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
+# Ticket #17: TOML persistence (the quick-send profile), the i18n dictionaries,
+# the encoding selector's codecs, and the profile's derives.
+toml = "0.8"
+rust-i18n = "4"
+encoding_rs = "0.8"
+serde = { version = "1", features = ["derive"] }
+# Ticket #16: the log store's default directory (platform config/data dir);
+# API-compatible with #17's `dirs` usage.
 dirs = "7.0.0"
 
 [build-dependencies]

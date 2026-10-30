@@ -2,47 +2,123 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="Rcom.MainWindow"
         Title="rcom"
-        Width="960" Height="640">
-  <!-- The tracer-bullet layout (docs/design.md, "UI layout", reduced):
-       log view on top, the toolbar/send bar below. -->
-  <Grid RowDefinitions="*,Auto" Margin="8">
-    <ListBox x:Name="LogList"
-             Grid.Row="0"
-             FontSize="13" />
+        Width="1120" Height="680">
+  <!-- The tracer-bullet layout grown its right-hand quick-send bar (ticket #17):
+       left = log view + toolbar (port/baud/open/encoding/hide-sent/send); right =
+       the quick-send pages. Visible strings are set from the controller via `t!`
+       (the i18n dictionaries), so the XAML carries none. -->
+  <Grid ColumnDefinitions="*,320" Margin="8">
+    <!-- Left: log view on top, the toolbar/send bar below. -->
+    <Grid Grid.Column="0" RowDefinitions="*,Auto">
+      <ListBox x:Name="LogList"
+               Grid.Row="0"
+               FontSize="13" />
 
-    <Grid Grid.Row="1"
-          ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,*,Auto"
-          Margin="0,8,0,0">
-      <ComboBox x:Name="PortSelector"
-                Grid.Column="0"
-                MinWidth="170"
-                Margin="0,0,6,0" />
-      <Button x:Name="RefreshButton"
-              Grid.Column="1"
-              Content="Refresh"
-              Margin="0,0,6,0" />
-      <ComboBox x:Name="BaudSelector"
+      <Grid Grid.Row="1"
+            ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,*,Auto"
+            Margin="0,8,0,0">
+        <TextBlock x:Name="PortCaption"
+                   Grid.Column="0"
+                   VerticalAlignment="Center"
+                   Margin="0,0,4,0" />
+        <ComboBox x:Name="PortSelector"
+                  Grid.Column="1"
+                  MinWidth="150"
+                  Margin="0,0,6,0" />
+        <Button x:Name="RefreshButton"
                 Grid.Column="2"
-                MinWidth="100"
+                MinWidth="70"
                 Margin="0,0,6,0" />
-      <Button x:Name="OpenCloseButton"
-              Grid.Column="3"
-              Content="Open"
-              MinWidth="80"
-              Margin="0,0,12,0" />
-      <!-- The hide-sent filter: view-only (contract §2.1 — presentation options are
-           viewmodel state); the log store and auto-save file stay complete. -->
-      <CheckBox x:Name="HideSentToggle"
-                Grid.Column="4"
-                Content="Hide sent"
-                Margin="0,0,12,0" />
-      <TextBox x:Name="SendBox"
-               Grid.Column="5"
-               Margin="0,0,6,0" />
-      <Button x:Name="SendButton"
-              Grid.Column="6"
-              Content="Send"
-              MinWidth="90" />
+        <TextBlock x:Name="BaudCaption"
+                   Grid.Column="3"
+                   VerticalAlignment="Center"
+                   Margin="0,0,4,0" />
+        <ComboBox x:Name="BaudSelector"
+                  Grid.Column="4"
+                  MinWidth="90"
+                  Margin="0,0,6,0" />
+        <Button x:Name="OpenCloseButton"
+                Grid.Column="5"
+                MinWidth="80"
+                Margin="0,0,6,0" />
+        <TextBlock x:Name="EncodingCaption"
+                   Grid.Column="6"
+                   VerticalAlignment="Center"
+                   Margin="0,0,4,0" />
+        <ComboBox x:Name="EncodingSelector"
+                  Grid.Column="7"
+                  MinWidth="100"
+                  Margin="0,0,6,0" />
+        <!-- The hide-sent filter: view-only (contract §2.1 — presentation options
+             are viewmodel state); the log store and auto-save file stay complete.
+             The content string comes from the controller (`t!("hide_sent")`). -->
+        <CheckBox x:Name="HideSentToggle"
+                  Grid.Column="8"
+                  Margin="0,0,12,0" />
+        <TextBox x:Name="SendBox"
+                 Grid.Column="9"
+                 Margin="0,0,6,0" />
+        <Button x:Name="SendButton"
+                Grid.Column="10"
+                MinWidth="90" />
+      </Grid>
+    </Grid>
+
+    <!-- Right: the quick-send pages (10 pages, unlimited entries per page). -->
+    <Grid Grid.Column="1"
+          RowDefinitions="Auto,Auto,*,Auto"
+          Margin="12,0,0,0">
+      <StackPanel Grid.Row="0"
+                  Orientation="Horizontal"
+                  Spacing="8">
+        <TextBlock x:Name="QuickSendTitle"
+                   FontSize="13" />
+        <TextBlock x:Name="QuickSendPageLabel"
+                   FontSize="11" />
+      </StackPanel>
+
+      <PipsPager x:Name="QuickSendPager"
+                 Grid.Row="1"
+                 Margin="0,6,0,6" />
+
+      <ScrollViewer Grid.Row="2">
+        <StackPanel x:Name="QuickSendEntries"
+                    Spacing="4" />
+      </ScrollViewer>
+
+      <Grid Grid.Row="3"
+            ColumnDefinitions="Auto,*"
+            RowDefinitions="Auto,Auto,Auto"
+            Margin="0,8,0,0">
+        <TextBlock x:Name="QuickSendLabelCaption"
+                   Grid.Row="0" Grid.Column="0"
+                   Margin="0,0,6,4"
+                   FontSize="12" />
+        <TextBox x:Name="QuickSendLabelBox"
+                 Grid.Row="0" Grid.Column="1"
+                 Margin="0,0,0,4" />
+        <TextBlock x:Name="QuickSendPayloadCaption"
+                   Grid.Row="1" Grid.Column="0"
+                   Margin="0,0,6,4"
+                   FontSize="12" />
+        <TextBox x:Name="QuickSendPayloadBox"
+                 Grid.Row="1" Grid.Column="1"
+                 Margin="0,0,0,4" />
+        <CheckBox x:Name="QuickSendHexCheck"
+                  Grid.Row="2" Grid.Column="0"
+                  VerticalAlignment="Center" />
+        <StackPanel Grid.Row="2" Grid.Column="1"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Spacing="4">
+          <Button x:Name="QuickSendAddButton"
+                  MinWidth="56" />
+          <Button x:Name="QuickSendSaveButton"
+                  MinWidth="56" />
+          <Button x:Name="QuickSendDeleteButton"
+                  MinWidth="56" />
+        </StackPanel>
+      </Grid>
     </Grid>
   </Grid>
 </Window>
