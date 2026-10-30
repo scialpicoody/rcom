@@ -1,0 +1,37 @@
+# rcom UI strings — English (rust-i18n _version 1: keys at top level, the
+# locale comes from the file name).
+_version: 1
+# Window
+title: "rcom — serial tool"
+# Toolbar
+port: "Port"
+baud: "Baud"
+refresh: "Refresh"
+open: "Open"
+close: "Close"
+encoding: "Encoding"
+send: "Send"
+send_hint: "text to send"
+# Quick-send panel
+quick_send: "Quick send"
+page_indicator: "Page %{page}/%{total}"
+quick_label: "Label"
+quick_payload: "Payload"
+quick_hex: "HEX"
+quick_add: "Add"
+quick_save: "Save"
+quick_delete: "Delete"
+quick_edit: "✎"
+quick_empty: "No entries on this page — add one below."
+quick_label_hint: "entry label"
+quick_payload_hint: "text, or hex bytes when HEX is checked"
+# Status / diagnostics rows
+select_port_first: "select a port first"
+open_failed: "open %{name} failed: %{error}"
+send_failed: "send failed: %{error}"
+port_list_failed: "port list failed: %{error}"
+invalid_hex_payload: "invalid hex payload: %{error}"
+bus_lag: "%{missed} events missed (bus lag)"
+opened: "%{name} opened"
+closed: "%{name} closed"
+port_error: "%{name} error: %{detail}"

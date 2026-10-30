@@ -3,6 +3,7 @@
 
 pub(crate) mod controller;
 mod host;
+pub(crate) mod i18n;
 
 use crate::main_window::MainWindow;
 use ferroui_base::{

@@ -8,6 +8,10 @@
 // The compiled markup of a document names the types of this crate by the name of the crate.
 extern crate self as rcom;
 
+// The i18n dictionaries (`locales/en.yml`, `locales/zh.yml`), compiled in; `t!`
+// resolves through the items this generates. English falls back for missing keys.
+rust_i18n::i18n!("locales", fallback = "en");
+
 pub mod core;
 
 mod app;
@@ -19,6 +23,7 @@ mod register_types;
 ferroui_markup_xaml::include_compiled_xaml!();
 
 pub use app::App;
+pub use app::i18n::init_locale;
 pub use main_window::MainWindow;
 pub use register_types::{register_types, ASSEMBLY};
 
