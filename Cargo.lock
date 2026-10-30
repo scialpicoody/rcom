@@ -627,6 +627,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferroui-themes-fluent"
+version = "0.4.0-preview.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24e9f13b7f2d94837f78cf73fd6f3f852b766156ff9db1f4c9e6c26f836c46a4"
+dependencies = [
+ "ferroui-base",
+ "ferroui-build",
+ "ferroui-controls",
+ "ferroui-dialogs",
+ "ferroui-markup-xaml",
+]
+
+[[package]]
 name = "ferroui-themes-winui"
 version = "0.4.0-preview.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -637,6 +650,30 @@ dependencies = [
  "ferroui-controls",
  "ferroui-dialogs",
  "ferroui-markup-xaml",
+]
+
+[[package]]
+name = "ferroui-view"
+version = "0.4.0-preview.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55e4154890b68ca5ee631e8f7f170e2084973a9cbb93aae777fc2e108d9c3f79"
+dependencies = [
+ "ferroui-base",
+ "ferroui-controls",
+ "ferroui-desktop",
+ "ferroui-themes-fluent",
+ "ferroui-view-macros",
+]
+
+[[package]]
+name = "ferroui-view-macros"
+version = "0.4.0-preview.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3b5d6eb5df762e41c462c6473e94b08c58368f1f749a1522698eeb67f841ca5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1225,6 +1262,7 @@ dependencies = [
  "ferroui-desktop",
  "ferroui-markup-xaml",
  "ferroui-themes-winui",
+ "ferroui-view",
  "serialport",
  "thiserror",
  "tokio",
