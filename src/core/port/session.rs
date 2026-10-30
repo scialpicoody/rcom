@@ -44,6 +44,10 @@ impl Session {
                     state,
                     detail,
                     timestamp: chrono::Local::now(),
+                    // Terminal events of a dying session carry no open config;
+                    // the Open/Reopened events (with baud) come from the manager
+                    // and the reconnect machine.
+                    baud: None,
                 }))
             };
             while let Some(event) = events.recv().await {

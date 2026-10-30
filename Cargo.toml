@@ -50,6 +50,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 anyhow = "1"
+dirs = "7.0.0"
 
 [build-dependencies]
 ferroui-build = { version = "=0.4.0-preview.1" }

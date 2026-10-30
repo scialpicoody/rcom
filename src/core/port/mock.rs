@@ -1,6 +1,13 @@
 //! The mock backend: a fake port named `MOCK0` that appears in the port list and
 //! echoes every write back as received data — a null-modem loopback plug in
 //! software. This is the hardware-free demo seam (formalized by ticket #32).
+//!
+//! The plug can be pulled: [`MockPlug`] simulates an unplug/replug (contract §5d in
+//! minimal form; the full `MockControl` lands with the mock-drawer ticket). While
+//! unplugged, `MOCK0` disappears from the listing, `open` refuses, and a live
+//! session dies with a reader error — exactly what a real unplug does to
+//! [`serial`](super::serial) sessions, so the reconnect machine and hotplug poller
+//! run against the same code paths as with hardware.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -18,17 +25,63 @@ pub const MOCK_PORT_NAME: &str = "MOCK0";
 /// log view to show TX and RX as two visibly distinct rows.
 const MOCK_ECHO_DELAY: Duration = Duration::from_millis(50);
 
+/// How often the echo thread re-checks its cancel/plug flags while the line is idle
+/// (bounds how long an injected unplug takes to kill the session).
+const MOCK_TICK: Duration = Duration::from_millis(20);
+
+/// The shared plug state and its demo control: `unplug` pulls the plug, `replug`
+/// puts it back. Clones share the state; `Send + Sync` so the app-side autodemo can
+/// drive it from the core driver task.
+#[derive(Clone)]
+pub struct MockPlug {
+    plugged: Arc<AtomicBool>,
+}
+
+impl Default for MockPlug {
+    fn default() -> Self {
+        Self {
+            plugged: Arc::new(AtomicBool::new(true)),
+        }
+    }
+}
+
+impl MockPlug {
+    pub fn unplug(&self) {
+        self.plugged.store(false, Ordering::Relaxed);
+        tracing::info!("MOCK0 unplugged (mock injection)");
+    }
+
+    pub fn replug(&self) {
+        self.plugged.store(true, Ordering::Relaxed);
+        tracing::info!("MOCK0 replugged (mock injection)");
+    }
+
+    pub fn is_plugged(&self) -> bool {
+        self.plugged.load(Ordering::Relaxed)
+    }
+}
+
 #[derive(Default)]
-pub struct MockBackend;
+pub struct MockBackend {
+    plug: MockPlug,
+}
 
 impl MockBackend {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// A handle to this backend's plug state (the unplug/replug demo control).
+    pub fn plug(&self) -> MockPlug {
+        self.plug.clone()
     }
 }
 
 impl SerialBackend for MockBackend {
     fn enumerate(&self) -> Result<Vec<PortInfo>> {
+        if !self.plug.is_plugged() {
+            return Ok(Vec::new());
+        }
         Ok(vec![PortInfo {
             name: MOCK_PORT_NAME.into(),
             vid: None,
@@ -42,6 +95,11 @@ impl SerialBackend for MockBackend {
         if name != MOCK_PORT_NAME {
             return Err(crate::core::error::CoreError::NotOpen(name.to_string()));
         }
+        if !self.plug.is_plugged() {
+            return Err(crate::core::error::CoreError::NotOpen(
+                "MOCK0 is unplugged".into(),
+            ));
+        }
 
         let cancel = Arc::new(AtomicBool::new(false));
 
@@ -49,24 +107,48 @@ impl SerialBackend for MockBackend {
         let (write_tx, mut write_rx) = mpsc::channel::<Vec<u8>>(64);
 
         // The echo thread: every written chunk comes back as RX. Ends when the
-        // cancel flag is set (close) or the write queue closes.
+        // cancel flag is set (close), the plug is pulled (unplug injection → the
+        // session dies with an error, like a real reader on a vanished port), or
+        // the write queue closes.
         let echo_cancel = cancel.clone();
+        let echo_plug = self.plug.clone();
         std::thread::Builder::new()
             .name("rcom-mock-echo".into())
             .spawn(move || {
                 let _ = event_tx.blocking_send(ReadEvent::Data(
                     b"MOCK0 ready: writes echo back as RX\r\n".to_vec(),
                 ));
-                while let Some(bytes) = write_rx.blocking_recv() {
+                loop {
                     if echo_cancel.load(Ordering::Relaxed) {
+                        let _ = event_tx.blocking_send(ReadEvent::Closed);
                         break;
                     }
-                    std::thread::sleep(MOCK_ECHO_DELAY);
-                    if event_tx.blocking_send(ReadEvent::Data(bytes)).is_err() {
+                    if !echo_plug.is_plugged() {
+                        let _ = event_tx.blocking_send(ReadEvent::Error(
+                            "MOCK0 was unplugged".into(),
+                        ));
                         break;
+                    }
+                    match write_rx.try_recv() {
+                        Ok(bytes) => {
+                            std::thread::sleep(MOCK_ECHO_DELAY);
+                            if echo_cancel.load(Ordering::Relaxed) {
+                                let _ = event_tx.blocking_send(ReadEvent::Closed);
+                                break;
+                            }
+                            if event_tx.blocking_send(ReadEvent::Data(bytes)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(mpsc::error::TryRecvError::Empty) => {
+                            std::thread::sleep(MOCK_TICK);
+                        }
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            let _ = event_tx.blocking_send(ReadEvent::Closed);
+                            break;
+                        }
                     }
                 }
-                let _ = event_tx.blocking_send(ReadEvent::Closed);
             })
             .expect("spawn rcom-mock-echo");
 
@@ -122,5 +204,56 @@ mod tests {
             .expect("close timed out")
             .expect("stream should end, not hang");
         assert!(matches!(event, ReadEvent::Closed | ReadEvent::Data(_)));
+    }
+
+    /// Pulling the plug kills the live session with a reader error — the unplug
+    /// injection behaves like a real vanished port (contract §5d, minimal form).
+    #[tokio::test]
+    async fn unplug_kills_the_live_session_with_an_error() {
+        let backend = MockBackend::new();
+        let plug = backend.plug();
+        let mut events = backend
+            .open("MOCK0", &PortConfig::new(115_200))
+            .unwrap()
+            .events;
+
+        plug.unplug();
+        assert!(!plug.is_plugged());
+
+        // The reader stream ends with an Error within one mock tick (never hangs).
+        let deadline = tokio::time::Duration::from_secs(2);
+        loop {
+            match tokio::time::timeout(deadline, events.recv())
+                .await
+                .expect("unplug not noticed in time")
+                .expect("event stream ended early")
+            {
+                ReadEvent::Data(_) => {} // the ready banner
+                ReadEvent::Error(message) => {
+                    assert!(message.contains("unplugged"), "{message}");
+                    break;
+                }
+                ReadEvent::Closed => panic!("unplug must end with an error, not a clean close"),
+            }
+        }
+
+        plug.replug();
+        assert!(plug.is_plugged());
+    }
+
+    /// While unplugged the port is delisted and refuses to open; after a replug
+    /// both work again — what the hotplug poller and reconnect machine observe.
+    #[test]
+    fn unplug_delists_and_refuses_open() {
+        let backend = MockBackend::new();
+        let plug = backend.plug();
+
+        assert_eq!(backend.enumerate().unwrap().len(), 1);
+        plug.unplug();
+        assert!(backend.enumerate().unwrap().is_empty());
+        assert!(backend.open("MOCK0", &PortConfig::new(115_200)).is_err());
+        plug.replug();
+        assert_eq!(backend.enumerate().unwrap().len(), 1);
+        assert!(backend.open("MOCK0", &PortConfig::new(115_200)).is_ok());
     }
 }

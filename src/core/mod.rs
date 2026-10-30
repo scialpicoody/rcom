@@ -5,13 +5,16 @@
 //!   to and every consumer (log view, plot taps, UI) subscribes to.
 //! - [`codec`]: byte-level helpers (hex, lossy UTF-8).
 //! - [`error`]: the core error type.
+//! - [`logstore`]: the session log — ring buffer of raw records plus a timestamped
+//!   auto-save file sink.
 //! - [`port`]: the serial layer — the [`port::SerialBackend`] trait, the real
-//!   `serialport` implementation, the mock backend, and the manager/session handles
-//!   the UI drives.
+//!   `serialport` implementation, the mock backend, the manager/session handles
+//!   the UI drives, the reconnect state machine and the hotplug poller.
 
 pub mod bus;
 pub mod codec;
 pub mod error;
+pub mod logstore;
 pub mod port;
 
 pub use bus::{Event, EventBus, LogEvent, LogLevel, PortEvent, PortState};

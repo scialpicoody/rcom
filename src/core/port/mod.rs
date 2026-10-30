@@ -1,14 +1,17 @@
 //! The serial layer (docs/design.md, "Serial layer"): the [`SerialBackend`] trait —
 //! enumerate ports, open one into a reader stream plus a writer — with the real
-//! `serialport` implementation ([`serial`]), the hardware-free [`mock`] backend, and
-//! the [`manager`](self) handles the UI drives.
+//! `serialport` implementation ([`serial`]), the hardware-free [`mock`] backend, the
+//! [`manager`](self) handles the UI drives, the [`reconnect`] auto-reconnect state
+//! machine and the [`hotplug`] poller.
 //!
 //! The design rule this layer exists for: **close never hangs.** The blocking reader
 //! runs on its own thread with a short read timeout and a cancel flag, so a session
 //! is always dropped within one read timeout, even on unplug.
 
+pub mod hotplug;
 pub mod manager;
 pub mod mock;
+pub mod reconnect;
 pub mod serial;
 pub mod session;
 
