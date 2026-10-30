@@ -4,6 +4,7 @@
 pub(crate) mod controller;
 mod host;
 pub(crate) mod i18n;
+mod quicksend;
 
 use crate::main_window::MainWindow;
 use ferroui_base::{

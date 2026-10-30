@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use rcom::core::bus::{DataEvent, Direction, Event, LogEvent, LogLevel, PortEvent, PortState};
-use rcom::core::codec::{hex_spaced, lossy_utf8};
+use rcom::core::codec::{hex_spaced, lossy_utf8, TextEncoding};
 use rcom::core::port::manager::PortManager;
 use rcom::core::port::mock::{MockBackend, MOCK_PORT_NAME};
 use rcom::core::port::serial::SerialPortBackend;
@@ -30,7 +30,19 @@ pub enum Command {
     RefreshPorts,
     Open { name: String, baud: u32 },
     Close,
-    SendText(String),
+    /// Text from the send box, already encoded to wire bytes by the UI (the
+    /// selector's encoding applies there, so the core stays encoding-agnostic).
+    SendBytes(Vec<u8>),
+}
+
+/// One data chunk for the UI's log model: the raw bytes stay authoritative so an
+/// encoding switch re-renders history (docs/ui-drafts/05-contract.md §1.3).
+#[derive(Debug, Clone)]
+pub struct DataRowMsg {
+    pub direction: Direction,
+    /// Pre-formatted local timestamp (`%H:%M:%S%.3f`).
+    pub stamp: String,
+    pub bytes: Vec<u8>,
 }
 
 /// A message from the core driver to the UI thread.
@@ -40,8 +52,12 @@ pub enum UiMsg {
     Ports(Vec<PortInfo>),
     /// A session's port state (drives the Open/Close button).
     PortState(PortState),
-    /// A pre-formatted log row (timestamp, direction/origin, hex, text).
+    /// A pre-formatted log row (port state lines, diagnostics).
     Row(String),
+    /// A data chunk; the UI renders it with the current encoding.
+    Data(DataRowMsg),
+    /// Autodemo drives the encoding switch (the same code path as the selector).
+    SetEncoding(TextEncoding),
 }
 
 /// The process-wide handle the UI thread uses to reach the core. `ui_rx` is drained
@@ -100,17 +116,41 @@ async fn driver(
     commands_tx: mpsc::UnboundedSender<Command>,
     ui: std::sync::mpsc::Sender<UiMsg>,
 ) {
-    // The demo path: open MOCK0 and send `ping`; the mock echoes it back as RX.
-    let mut awaiting_echo = false;
-    if autodemo_enabled() {
-        tracing::info!("RCOM_AUTODEMO=1: driving the MOCK0 demo path");
-        let demo = commands_tx.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            let _ = demo.send(Command::Open { name: MOCK_PORT_NAME.into(), baud: 115_200 });
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let _ = demo.send(Command::SendText("ping".into()));
-        });
+    // The demo paths: `RCOM_AUTODEMO=1` opens MOCK0 and sends `ping` (the mock
+    // echoes it back as RX); `RCOM_AUTODEMO=encoding` sends 你好 as GBK bytes and
+    // then drives the encoding switch — the re-render proof of ticket #17.
+    // (`=persist` is handled entirely on the UI side, see the controller.)
+    let mut awaiting_echo: Option<Vec<u8>> = None;
+    match AutodemoMode::from_env() {
+        AutodemoMode::Off | AutodemoMode::Persist => {}
+        AutodemoMode::Basic => {
+            tracing::info!("RCOM_AUTODEMO=1: driving the MOCK0 demo path");
+            let demo = commands_tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = demo.send(Command::Open { name: MOCK_PORT_NAME.into(), baud: 115_200 });
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let _ = demo.send(Command::SendBytes(b"ping".to_vec()));
+            });
+            awaiting_echo = Some(b"ping".to_vec());
+        }
+        AutodemoMode::Encoding => {
+            tracing::info!("RCOM_AUTODEMO=encoding: driving the GBK encoding demo path");
+            let demo = commands_tx.clone();
+            let ui = ui.clone();
+            let payload = TextEncoding::Gbk.encode("你好，rcom\r\n");
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = demo.send(Command::Open { name: MOCK_PORT_NAME.into(), baud: 115_200 });
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                // TX in GBK while the display still decodes UTF-8: garbled rows.
+                let _ = demo.send(Command::SendBytes(payload));
+                // Then the switch: the UI re-renders the retained raw bytes.
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                let _ = ui.send(UiMsg::SetEncoding(TextEncoding::Gbk));
+            });
+            awaiting_echo = Some(TextEncoding::Gbk.encode("你好，rcom\r\n"));
+        }
     }
 
     let mut events = bus.subscribe();
@@ -118,31 +158,23 @@ async fn driver(
         tokio::select! {
             command = commands.recv() => match command {
                 None => break, // the host is gone: app shutting down
-                Some(command) => {
-                    if autodemo_enabled() {
-                        if let Command::SendText(text) = &command {
-                            if text == "ping" {
-                                awaiting_echo = true;
-                            }
-                        }
-                    }
-                    handle_command(&manager, &ui, command).await;
-                }
+                Some(command) => handle_command(&manager, &ui, command).await,
             },
             event = events.recv() => match event {
                 Ok(event) => {
-                    // Autodemo evidence in the trace log: the sent `ping` came back
-                    // over the mock as RX — send→TX and RX→bus→log proven in one run.
+                    // Autodemo evidence in the trace log: the sent bytes came back
+                    // over the mock as RX — send→port→bus proven for this run.
                     if let Event::Data(data) = &event {
-                        if awaiting_echo
-                            && data.direction == Direction::Rx
-                            && data.bytes.as_slice() == b"ping"
-                        {
-                            awaiting_echo = false;
-                            tracing::info!(
-                                "AUTODEMO OK: 'ping' sent as TX and echoed as RX \
-                                 (send→port→bus→log path proven)"
-                            );
+                        if let Some(expected) = &awaiting_echo {
+                            if data.direction == Direction::Rx
+                                && data.bytes.as_slice() == expected.as_slice()
+                            {
+                                awaiting_echo = None;
+                                tracing::info!(
+                                    "AUTODEMO OK: payload sent as TX and echoed as RX \
+                                     byte-exact (send→port→bus→log path proven)"
+                                );
+                            }
                         }
                     }
                     if let Event::Port(port) = &event {
@@ -151,15 +183,31 @@ async fn driver(
                             break; // UI gone
                         }
                     }
-                    if let Some(row) = render_event(&event) {
-                        tracing::debug!(target: "rcom::rows", "{row}");
-                        if ui.send(UiMsg::Row(row)).is_err() {
-                            break; // UI gone
+                    match &event {
+                        Event::Data(data) => {
+                            let row = format_data_row(data);
+                            tracing::debug!(target: "rcom::rows", "{row}");
+                            let message = UiMsg::Data(DataRowMsg {
+                                direction: data.direction,
+                                stamp: data.timestamp.format("%H:%M:%S%.3f").to_string(),
+                                bytes: data.bytes.as_slice().to_vec(),
+                            });
+                            if ui.send(message).is_err() {
+                                break; // UI gone
+                            }
+                        }
+                        Event::Port(_) | Event::Log(_) => {
+                            if let Some(row) = render_event(&event) {
+                                tracing::debug!(target: "rcom::rows", "{row}");
+                                if ui.send(UiMsg::Row(row)).is_err() {
+                                    break; // UI gone
+                                }
+                            }
                         }
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                    let _ = ui.send(UiMsg::Row(format!("!! {missed} events missed (bus lag)")));
+                    let _ = ui.send(UiMsg::Row(rust_i18n::t!("bus_lag", missed = missed).to_string()));
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
@@ -174,36 +222,38 @@ async fn handle_command(manager: &PortManager, ui: &std::sync::mpsc::Sender<UiMs
                 let _ = ui.send(UiMsg::Ports(ports));
             }
             Err(error) => {
-                let _ = ui.send(UiMsg::Row(format!("!! port list failed: {error}")));
+                let _ = ui.send(UiMsg::Row(rust_i18n::t!("port_list_failed", error = &error).to_string()));
             }
         },
         Command::Open { name, baud } => {
             if let Err(error) = manager.open(&name, PortConfig::new(baud)).await {
-                let _ = ui.send(UiMsg::Row(format!("!! open {name} failed: {error}")));
+                let _ = ui.send(UiMsg::Row(
+                    rust_i18n::t!("open_failed", name = &name, error = &error).to_string(),
+                ));
             }
         }
         Command::Close => manager.close().await,
-        Command::SendText(text) => {
-            if let Err(error) = manager.write(text.into_bytes()).await {
-                let _ = ui.send(UiMsg::Row(format!("!! send failed: {error}")));
+        Command::SendBytes(bytes) => {
+            if let Err(error) = manager.write(bytes).await {
+                let _ = ui.send(UiMsg::Row(rust_i18n::t!("send_failed", error = &error).to_string()));
             }
         }
     }
 }
 
-/// Turns a bus event into the row the log view shows: timestamp + direction/origin
-/// + hex + decoded text for data; state and diagnostics lines for the rest.
+/// Turns a non-data bus event into the row the log view shows (data chunks travel
+/// to the UI as raw [`DataRowMsg`]s and are rendered there, per encoding).
 pub fn render_event(event: &Event) -> Option<String> {
     match event {
-        Event::Data(data) => Some(format_data_row(data)),
+        Event::Data(_) => None,
         Event::Port(port) => Some(format_port_row(port)),
         Event::Log(log) => Some(format_log_row(log)),
     }
 }
 
 /// How much of one chunk one row shows before it is abbreviated.
-const ROW_HEX_BYTES: usize = 96;
-const ROW_TEXT_CHARS: usize = 128;
+pub const ROW_HEX_BYTES: usize = 96;
+pub const ROW_TEXT_CHARS: usize = 128;
 
 pub fn format_data_row(data: &DataEvent) -> String {
     let direction = match data.direction {
@@ -234,12 +284,15 @@ pub fn format_data_row(data: &DataEvent) -> String {
 pub fn format_port_row(port: &PortEvent) -> String {
     let stamp = port.timestamp.format("%H:%M:%S%.3f");
     match port.state {
-        PortState::Open => format!("{stamp}  ==  {} opened", port.port),
-        PortState::Closed => format!("{stamp}  ==  {} closed", port.port),
+        PortState::Open => format!("{stamp}  ==  {}", rust_i18n::t!("opened", name = &port.port)),
+        PortState::Closed => format!("{stamp}  ==  {}", rust_i18n::t!("closed", name = &port.port)),
         PortState::Error => format!(
-            "{stamp}  !!  {} error: {}",
-            port.port,
-            port.detail.as_deref().unwrap_or("unknown")
+            "{stamp}  !!  {}",
+            rust_i18n::t!(
+                "port_error",
+                name = &port.port,
+                detail = port.detail.as_deref().unwrap_or("unknown")
+            )
         ),
     }
 }
@@ -349,8 +402,27 @@ mod tests {
     }
 }
 
-fn autodemo_enabled() -> bool {
-    std::env::var("RCOM_AUTODEMO").is_ok_and(|value| value == "1")
+/// What `RCOM_AUTODEMO` asks for: the basic `ping` path, the GBK encoding path,
+/// the quick-send persistence path, or nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutodemoMode {
+    Off,
+    Basic,
+    Encoding,
+    Persist,
+}
+
+impl AutodemoMode {
+    /// Reads `RCOM_AUTODEMO`: `1` = basic, `encoding` = the GBK path,
+    /// `persist` = the quick-send persistence path, else off.
+    pub fn from_env() -> Self {
+        match std::env::var("RCOM_AUTODEMO").as_deref() {
+            Ok("1") => Self::Basic,
+            Ok("encoding") => Self::Encoding,
+            Ok("persist") => Self::Persist,
+            _ => Self::Off,
+        }
+    }
 }
 
 /// Both backends, behind one list: the real ports of the machine plus the mock's
