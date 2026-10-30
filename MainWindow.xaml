@@ -2,9 +2,41 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="Rcom.MainWindow"
         Title="rcom"
-        Width="400" Height="240">
-  <TextBlock Text="Hello, World!"
-             FontSize="28"
-             HorizontalAlignment="Center"
-             VerticalAlignment="Center" />
+        Width="960" Height="640">
+  <!-- The tracer-bullet layout (docs/design.md, "UI layout", reduced):
+       log view on top, the toolbar/send bar below. -->
+  <Grid RowDefinitions="*,Auto" Margin="8">
+    <ListBox x:Name="LogList"
+             Grid.Row="0"
+             FontSize="13" />
+
+    <Grid Grid.Row="1"
+          ColumnDefinitions="Auto,Auto,Auto,Auto,*,Auto"
+          Margin="0,8,0,0">
+      <ComboBox x:Name="PortSelector"
+                Grid.Column="0"
+                MinWidth="170"
+                Margin="0,0,6,0" />
+      <Button x:Name="RefreshButton"
+              Grid.Column="1"
+              Content="Refresh"
+              Margin="0,0,6,0" />
+      <ComboBox x:Name="BaudSelector"
+                Grid.Column="2"
+                MinWidth="100"
+                Margin="0,0,6,0" />
+      <Button x:Name="OpenCloseButton"
+              Grid.Column="3"
+              Content="Open"
+              MinWidth="80"
+              Margin="0,0,12,0" />
+      <TextBox x:Name="SendBox"
+               Grid.Column="4"
+               Margin="0,0,6,0" />
+      <Button x:Name="SendButton"
+              Grid.Column="5"
+              Content="Send"
+              MinWidth="90" />
+    </Grid>
+  </Grid>
 </Window>

@@ -62,10 +62,12 @@ impl PortManager {
         };
 
         let id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+        // Publish the open state before the session's forwarder can deliver data,
+        // so the log reads "opened" before any RX rows of the new session.
+        self.publish_port(id, name, PortState::Open, None);
         let session = Session::spawn(id, name.to_string(), opened, config, self.bus.clone());
         *current = Some(session);
 
-        self.publish_port(id, name, PortState::Open, None);
         tracing::info!(session = id, port = name, "session open");
         Ok(id)
     }
@@ -102,6 +104,7 @@ impl PortManager {
             port: port.to_string(),
             state,
             detail,
+            timestamp: chrono::Local::now(),
         }));
     }
 }

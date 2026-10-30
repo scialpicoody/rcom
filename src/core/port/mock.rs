@@ -101,23 +101,18 @@ mod tests {
         opened.writer.try_write(b"ping".to_vec()).unwrap();
 
         let deadline = tokio::time::Duration::from_secs(2);
-        let mut saw_echo = false;
         loop {
             match tokio::time::timeout(deadline, events.recv())
                 .await
                 .expect("echo timed out")
                 .expect("event stream ended early")
             {
-                ReadEvent::Data(bytes) if bytes == b"ping" => {
-                    saw_echo = true;
-                    break;
-                }
+                ReadEvent::Data(bytes) if bytes == b"ping" => break,
                 ReadEvent::Data(_) => {} // the ready banner
                 ReadEvent::Error(message) => panic!("mock errored: {message}"),
                 ReadEvent::Closed => panic!("mock closed before the echo"),
             }
         }
-        assert!(saw_echo);
 
         // Cancel: the stream ends with Closed promptly.
         opened.cancel.store(true, Ordering::Relaxed);

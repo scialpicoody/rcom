@@ -1,4 +1,5 @@
-//! The class of the document `MainWindow.xaml`: a window with "Hello, World!" in its middle.
+//! The class of the document `MainWindow.xaml`: the rcom main window — port and
+//! baud selectors, open/close, the virtualized log view and the send bar.
 
 use ferroui_base::input::InputElementImpl;
 use ferroui_base::interactivity::InteractiveImpl;
@@ -47,7 +48,36 @@ impl MainWindow {
     pub fn new() -> Ref<Self> {
         let this = instantiate(Self::construct());
         Self::initialize_component(&this);
+        // The markup is populated: the controller can resolve the named controls.
+        crate::app::controller::MainController::attach(&this);
+        Self::start_smoke_exit(&this);
         this
+    }
+
+    /// The smoke run: with `FERROUI_SMOKE_EXIT_MS=<n>` the main window closes
+    /// itself after `n` milliseconds, ending the main loop (the canonical app-side
+    /// pattern of ferroui-desktop's `hello_window` example).
+    fn start_smoke_exit(this: &Ref<Self>) {
+        let Ok(ms) = std::env::var("FERROUI_SMOKE_EXIT_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(|ms| ms.max(1))
+            .ok_or(())
+        else {
+            return;
+        };
+        tracing::info!(smoke_exit_ms = ms, "smoke run: will close the main window");
+        let window = this.clone();
+        // The disposable keeps the timer alive; this one-shot lives as long as the
+        // app, so it is leaked deliberately.
+        std::mem::forget(ferroui_base::threading::DispatcherTimer::run_once(
+            move || {
+                tracing::info!("smoke run: closing the main window");
+                window.close();
+            },
+            std::time::Duration::from_millis(ms),
+            ferroui_base::threading::DispatcherPriority::NORMAL,
+        ));
     }
 
     /// `InitializeComponent()`: populates the window from its document.

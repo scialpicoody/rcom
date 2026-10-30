@@ -74,6 +74,7 @@ pub struct PortEvent {
     pub state: PortState,
     /// Error detail for [`PortState::Error`], or a human note otherwise.
     pub detail: Option<String>,
+    pub timestamp: DateTime<Local>,
 }
 
 /// The severity of a [`LogEvent`].

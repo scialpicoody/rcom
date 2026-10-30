@@ -43,6 +43,7 @@ impl Session {
                     port: session_port.clone(),
                     state,
                     detail,
+                    timestamp: chrono::Local::now(),
                 }))
             };
             while let Some(event) = events.recv().await {

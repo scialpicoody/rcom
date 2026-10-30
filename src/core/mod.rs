@@ -14,5 +14,5 @@ pub mod codec;
 pub mod error;
 pub mod port;
 
-pub use bus::{Event, LogEvent, LogLevel, PortEvent, PortState};
+pub use bus::{Event, EventBus, LogEvent, LogLevel, PortEvent, PortState};
 pub use error::{CoreError, Result};
