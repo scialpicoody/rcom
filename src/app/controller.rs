@@ -10,6 +10,10 @@
 //! Ticket #16 additions woven in: the hide-sent filter (a view-only projection of
 //! the same row model) and the Open/Close button that stays Close while the
 //! reconnect machine watches.
+//! Ticket #19 additions: the bottom tabbed pane's Script page — the monospaced
+//! editor (Run/Stop drive the standalone script VM through the core driver), the
+//! per-name script store, the bundled samples, and the TX pre-send hook
+//! affordance (a one-line conversion script + enable toggle).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -18,14 +22,18 @@ use std::time::Duration;
 use ferroui_base::controls::NameScopeExtensions;
 use ferroui_base::input::Key;
 use ferroui_base::layout::Orientation;
+use ferroui_base::media::FontFamily;
 use ferroui_base::threading::{DispatcherPriority, DispatcherTimer};
 use ferroui_base::{BoxedValue, Ref, StyledElement};
+use ferroui_controls::primitives::HeaderedContentControl;
 use ferroui_controls::{
-    Button, CheckBox, ComboBox, Control, ListBox, PipsPager, StackPanel, TextBox, TextBlock,
+    Button, CheckBox, ComboBox, Control, ListBox, PipsPager, StackPanel, TabItem, TextBox,
+    TextBlock,
 };
 
 use super::host::{core_host, AutodemoMode, Command, UiMsg};
 use super::quicksend::{QuickSendEntry, QuickSendStore, PAGE_COUNT};
+use super::scriptstore;
 use rcom::core::bus::{Direction, PortState};
 use rcom::core::codec::{hex_spaced, parse_hex, TextEncoding};
 use rcom::core::port::PortInfo;
@@ -42,6 +50,10 @@ const ROW_CAP: usize = 5000;
 
 /// How often the UI pumps messages from the core driver.
 const PUMP_INTERVAL: Duration = Duration::from_millis(30);
+
+/// The script editor's monospaced families, first available wins (the pin's
+/// TextBox has no XAML-settable font family — set in code, per the #19 brief).
+const SCRIPT_EDITOR_FONT: &str = "Menlo, Consolas, DejaVu Sans Mono, Courier New";
 
 /// One line of the log view: pre-formatted text (state rows, diagnostics; the
 /// `direction` stays `None` there) or a data chunk with its raw bytes — the
@@ -83,6 +95,20 @@ pub struct MainController {
     quick_add: Ref<Button>,
     quick_save: Ref<Button>,
     quick_delete: Ref<Button>,
+    // The script page (bottom pane, ticket #19).
+    script_tab: Ref<TabItem>,
+    script_file_caption: Ref<TextBlock>,
+    script_selector: Ref<ComboBox>,
+    script_name_box: Ref<TextBox>,
+    script_new: Ref<Button>,
+    script_save: Ref<Button>,
+    script_delete: Ref<Button>,
+    script_run: Ref<Button>,
+    script_stop: Ref<Button>,
+    tx_hook_caption: Ref<TextBlock>,
+    tx_hook_box: Ref<TextBox>,
+    tx_hook_enable: Ref<CheckBox>,
+    script_editor: Ref<TextBox>,
     // State.
     ports: RefCell<Vec<PortInfo>>,
     is_open: Cell<bool>,
@@ -93,6 +119,9 @@ pub struct MainController {
     quick_store: RefCell<QuickSendStore>,
     quick_page: Cell<usize>,
     quick_editing: Cell<Option<usize>>,
+    /// The saved script names behind the picker (samples come first, from
+    /// [`scriptstore::SAMPLES`]).
+    scripts: RefCell<Vec<String>>,
 }
 
 impl MainController {
@@ -128,6 +157,19 @@ impl MainController {
             quick_add: NameScopeExtensions::get(element, "QuickSendAddButton"),
             quick_save: NameScopeExtensions::get(element, "QuickSendSaveButton"),
             quick_delete: NameScopeExtensions::get(element, "QuickSendDeleteButton"),
+            script_tab: NameScopeExtensions::get(element, "ScriptTab"),
+            script_file_caption: NameScopeExtensions::get(element, "ScriptFileCaption"),
+            script_selector: NameScopeExtensions::get(element, "ScriptSelector"),
+            script_name_box: NameScopeExtensions::get(element, "ScriptNameBox"),
+            script_new: NameScopeExtensions::get(element, "ScriptNewButton"),
+            script_save: NameScopeExtensions::get(element, "ScriptSaveButton"),
+            script_delete: NameScopeExtensions::get(element, "ScriptDeleteButton"),
+            script_run: NameScopeExtensions::get(element, "ScriptRunButton"),
+            script_stop: NameScopeExtensions::get(element, "ScriptStopButton"),
+            tx_hook_caption: NameScopeExtensions::get(element, "TxHookCaption"),
+            tx_hook_box: NameScopeExtensions::get(element, "TxHookBox"),
+            tx_hook_enable: NameScopeExtensions::get(element, "TxHookEnable"),
+            script_editor: NameScopeExtensions::get(element, "ScriptEditor"),
             ports: RefCell::new(Vec::new()),
             is_open: Cell::new(false),
             hide_sent_on: Cell::new(false),
@@ -136,12 +178,14 @@ impl MainController {
             quick_store: RefCell::new(QuickSendStore::default()),
             quick_page: Cell::new(0),
             quick_editing: Cell::new(None),
+            scripts: RefCell::new(Vec::new()),
         });
 
         this.apply_ui_strings();
         this.fill_baud_selector();
         this.fill_encoding_selector();
         MainController::setup_quick_send(&this);
+        MainController::setup_script_page(&this);
         wire_events(&this);
         start_pump(&this);
         MainController::autodemo_persist_check(&this);
@@ -170,6 +214,23 @@ impl MainController {
         self.quick_delete.set_content(Some(Rc::new(t!("quick_delete").to_string())));
         self.quick_label_box.set_placeholder_text(Some(&t!("quick_label_hint")));
         self.quick_payload_box.set_placeholder_text(Some(&t!("quick_payload_hint")));
+
+        // The script page (the tab header rides the property — the XAML carries
+        // no strings).
+        self.script_tab.set_value(
+            HeaderedContentControl::header_property(),
+            Some(Rc::new(t!("script_tab").to_string())),
+        );
+        self.script_file_caption.set_text(Some(&t!("script_file")));
+        self.script_new.set_content(Some(Rc::new(t!("script_new").to_string())));
+        self.script_save.set_content(Some(Rc::new(t!("script_save").to_string())));
+        self.script_delete.set_content(Some(Rc::new(t!("script_delete").to_string())));
+        self.script_run.set_content(Some(Rc::new(t!("script_run").to_string())));
+        self.script_stop.set_content(Some(Rc::new(t!("script_stop").to_string())));
+        self.script_name_box.set_placeholder_text(Some(&t!("script_name_hint")));
+        self.tx_hook_caption.set_text(Some(&t!("tx_hook")));
+        self.tx_hook_box.set_placeholder_text(Some(&t!("tx_hook_hint")));
+        self.tx_hook_enable.set_content(Some(Rc::new(t!("tx_hook_enable").to_string())));
 
         // The Open/Close label tracks the port state.
         self.set_open_state(if self.is_open.get() { PortState::Open } else { PortState::Closed });
@@ -602,6 +663,174 @@ impl MainController {
         Self::rebuild_quick_entries(this);
     }
 
+    // ---- The script page (bottom pane) ---------------------------------------
+
+    /// Editor shape + the picker's initial content. The multiline flag and the
+    /// monospaced font are set here, not in the XAML (not XAML-reliable at this
+    /// FerroUI pin).
+    fn setup_script_page(this: &Rc<Self>) {
+        this.script_editor.set_accepts_return(true);
+        this.script_editor.set_font_family(FontFamily::new(SCRIPT_EDITOR_FONT));
+        this.script_editor.set_placeholder_text(Some(&t!("script_editor_hint")));
+        this.refresh_script_picker();
+    }
+
+    /// Rebuilds the picker: the built-in samples first, then the saved scripts
+    /// (`<config>/rcom/scripts/*.lua`), nothing selected.
+    fn refresh_script_picker(&self) {
+        let items = self.script_selector.items();
+        items.clear();
+        *self.scripts.borrow_mut() = scriptstore::list(scriptstore::scripts_dir().as_deref());
+        for sample in scriptstore::SAMPLES {
+            let value: BoxedValue = Rc::new(sample.name.to_string());
+            items.add(Some(value));
+        }
+        for name in self.scripts.borrow().iter() {
+            let value: BoxedValue = Rc::new(name.clone());
+            items.add(Some(value));
+        }
+        self.script_selector.set_selected_index(-1);
+    }
+
+    /// A picker selection: the script loads into the editor under its name
+    /// (samples read from the binary, saved scripts from the store).
+    fn load_selected_script(&self) {
+        let index = self.script_selector.selected_index();
+        if index < 0 {
+            return;
+        }
+        let index = index as usize;
+        let samples = scriptstore::SAMPLES.len();
+        let loaded = if index < samples {
+            let sample = &scriptstore::SAMPLES[index];
+            Some((sample.name.to_string(), sample.code.to_string()))
+        } else {
+            let name = self.scripts.borrow().get(index - samples).cloned();
+            name.and_then(|name| {
+                scriptstore::load(scriptstore::scripts_dir().as_deref(), &name)
+                    .map(|code| (name, code))
+            })
+        };
+        let Some((name, code)) = loaded else {
+            self.append_line(LogLine::Text {
+                text: format!("!! {}", t!("script_load_failed", name = "")),
+                direction: None,
+            });
+            return;
+        };
+        self.script_name_box.set_text(Some(&name));
+        self.script_editor.set_text(Some(&code));
+    }
+
+    /// New: a blank editor under a blank name (the picker selection clears).
+    fn new_script(&self) {
+        self.script_selector.set_selected_index(-1);
+        self.script_name_box.set_text(None);
+        self.script_editor.set_text(None);
+    }
+
+    /// Save(-as): the editor's code under the name box's text (typing a new name
+    /// is the save-as; the sanitized name lands back in the box).
+    fn save_script(&self) {
+        let Some(code) = self.script_editor.text() else { return };
+        if code.trim().is_empty() {
+            return;
+        }
+        let name = self.script_name_box.text().unwrap_or_default();
+        match scriptstore::save(scriptstore::scripts_dir().as_deref(), &name, &code) {
+            Ok(saved) => {
+                self.script_name_box.set_text(Some(&saved));
+                self.append_line(LogLine::Text {
+                    text: format!("## {}", t!("script_saved", name = &saved)),
+                    direction: None,
+                });
+                self.refresh_script_picker();
+            }
+            Err(error) => {
+                self.append_line(LogLine::Text {
+                    text: format!("!! {}", t!("script_save_failed", error = &error)),
+                    direction: None,
+                });
+            }
+        }
+    }
+
+    /// Delete: the script the editor shows (samples are read-only).
+    fn delete_script(&self) {
+        let Some(name) = self.script_name_box.text() else { return };
+        if scriptstore::sample_by_name(&name).is_some() {
+            self.append_line(LogLine::Text {
+                text: format!("## {}", t!("script_sample_readonly")),
+                direction: None,
+            });
+            return;
+        }
+        match scriptstore::delete(scriptstore::scripts_dir().as_deref(), &name) {
+            Ok(()) => {
+                self.append_line(LogLine::Text {
+                    text: format!("## {}", t!("script_deleted", name = &name)),
+                    direction: None,
+                });
+                self.new_script();
+                self.refresh_script_picker();
+            }
+            Err(error) => {
+                self.append_line(LogLine::Text {
+                    text: format!("!! {}", t!("script_delete_failed", error = &error)),
+                    direction: None,
+                });
+            }
+        }
+    }
+
+    /// Run: the editor's code to the driver — a fresh standalone VM boots with it
+    /// (a previous one is stopped first); its output lands in the log as `~~` rows.
+    fn run_script(&self) {
+        let Some(code) = self.script_editor.text() else { return };
+        if code.trim().is_empty() {
+            return;
+        }
+        let name = self
+            .script_name_box
+            .text()
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| t!("script_untitled").to_string());
+        self.append_line(LogLine::Text {
+            text: format!("~~ {}", t!("script_started", name = &name)),
+            direction: None,
+        });
+        core_host().commands.send(Command::RunScript { code }).ok();
+    }
+
+    /// Stop: the running panel VM unwinds (instruction-count hook), timers abort.
+    /// The driver confirms with a `~~` row.
+    fn stop_script(&self) {
+        core_host().commands.send(Command::StopScript).ok();
+    }
+
+    /// The TX hook affordance: enable sends the box's conversion script to the
+    /// session (every UI send funnels through it); disable clears it. An empty
+    /// script stays disabled — the AC's "default empty = disabled".
+    fn apply_tx_hook(&self) {
+        let enabled = self.tx_hook_enable.is_checked() == Some(true);
+        let script = self.tx_hook_box.text().unwrap_or_default();
+        if enabled && script.trim().is_empty() {
+            self.tx_hook_enable.set_is_checked(Some(false));
+            self.append_line(LogLine::Text {
+                text: format!("## {}", t!("tx_hook_empty")),
+                direction: None,
+            });
+            core_host().commands.send(Command::SetHook(None)).ok();
+            return;
+        }
+        core_host()
+            .commands
+            .send(Command::SetHook(enabled.then_some(script)))
+            .ok();
+        // The confirmation rows (`tx_hook_on` / `tx_hook_off`) come back from the
+        // driver as UiMsg rows.
+    }
+
     // ---- The pump -----------------------------------------------------------
 
     fn apply(&self, message: UiMsg) {
@@ -744,6 +973,48 @@ fn wire_events(this: &Rc<MainController>) {
     this.quick_delete.add_handler(Button::click_event(), {
         let this = Rc::clone(this);
         move |_, _| MainController::delete_quick_entry(&this)
+    });
+
+    // The script page (ticket #19).
+    this.script_selector.selection_changed({
+        let this = Rc::clone(this);
+        move |_, _| this.load_selected_script()
+    });
+    this.script_new.add_handler(Button::click_event(), {
+        let this = Rc::clone(this);
+        move |_, _| this.new_script()
+    });
+    this.script_save.add_handler(Button::click_event(), {
+        let this = Rc::clone(this);
+        move |_, _| this.save_script()
+    });
+    this.script_delete.add_handler(Button::click_event(), {
+        let this = Rc::clone(this);
+        move |_, _| this.delete_script()
+    });
+    this.script_run.add_handler(Button::click_event(), {
+        let this = Rc::clone(this);
+        move |_, _| this.run_script()
+    });
+    this.script_stop.add_handler(Button::click_event(), {
+        let this = Rc::clone(this);
+        move |_, _| this.stop_script()
+    });
+    this.tx_hook_enable.is_checked_changed({
+        let this = Rc::clone(this);
+        move |_, _| this.apply_tx_hook()
+    });
+    // Enter in the hook box re-applies the hook while enabled.
+    this.tx_hook_box.key_down({
+        let this = Rc::clone(this);
+        move |_, args| {
+            if args.key == Key::Enter {
+                args.set_handled(true);
+                if this.tx_hook_enable.is_checked() == Some(true) {
+                    this.apply_tx_hook();
+                }
+            }
+        }
     });
 }
 
