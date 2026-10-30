@@ -12,7 +12,10 @@
 pub mod bus;
 pub mod codec;
 pub mod error;
+pub mod lua;
 pub mod port;
 
-pub use bus::{Event, EventBus, LogEvent, LogLevel, PortEvent, PortState};
+pub use bus::{
+    Event, EventBus, LogEvent, LogLevel, PortEvent, PortState, ScriptOutEvent, ScriptOutKind,
+};
 pub use error::{CoreError, Result};

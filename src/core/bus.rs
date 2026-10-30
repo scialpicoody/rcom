@@ -94,6 +94,26 @@ pub struct LogEvent {
     pub message: String,
 }
 
+/// Output pushed out by a Lua VM (docs/design.md, "Lua layer"; ticket #18 owns the
+/// schema). `print`/`log.*` output and runtime errors land here; the log view
+/// renders them as rows, and ticket #19's script panel consumes the same stream.
+#[derive(Debug, Clone)]
+pub struct ScriptOutEvent {
+    /// The owning session's VM, or `None` for the standalone VM (docs/ui-drafts/05-contract.md §1.2).
+    pub session_id: Option<u64>,
+    pub timestamp: DateTime<Local>,
+    pub kind: ScriptOutKind,
+}
+
+/// The kind of a [`ScriptOutEvent`].
+#[derive(Debug, Clone)]
+pub enum ScriptOutKind {
+    /// `print(...)`/`log.*` output, already tab-joined by the VM's `print`.
+    Print { line: String },
+    /// A runtime error in a script (or a stopped script), as one message.
+    Error { message: String },
+}
+
 /// Everything that can happen in the engine. Later slices extend this enum
 /// (`ScriptOut`, net-tool events, ...); consumers must match with a catch-all arm.
 #[derive(Debug, Clone)]
@@ -101,6 +121,7 @@ pub enum Event {
     Data(DataEvent),
     Port(PortEvent),
     Log(LogEvent),
+    ScriptOut(ScriptOutEvent),
 }
 
 /// The sending half of the event bus. Clones subscribe new consumers through
@@ -189,6 +210,7 @@ mod tests {
                 ),
                 Event::Log(log) => format!("log#{}", log.message),
                 Event::Port(_) => "port".into(),
+                Event::ScriptOut(_) => "script".into(),
             })
             .collect();
 
