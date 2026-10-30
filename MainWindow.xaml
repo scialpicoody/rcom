@@ -8,8 +8,13 @@
        the quick-send pages. Visible strings are set from the controller via `t!`
        (the i18n dictionaries), so the XAML carries none. -->
   <Grid ColumnDefinitions="*,320" Margin="8">
-    <!-- Left: log view on top, the toolbar/send bar below. -->
-    <Grid Grid.Column="0" RowDefinitions="*,Auto">
+    <!-- Left: log view on top, the toolbar/send bar below, the tools pane at the
+         bottom. ISSUE #20 (lane2): the bottom pane is this TabControl with the
+         net tools tab; when the #19 bottom tab pane lands, move this single
+         x:Name="NetToolsTab" TabItem into that TabControl and delete this
+         wrapper (the page is wired by name from src/app/tools_net.rs, so its
+         position does not matter). -->
+    <Grid Grid.Column="0" RowDefinitions="*,Auto,240">
       <ListBox x:Name="LogList"
                Grid.Row="0"
                FontSize="13" />
@@ -62,6 +67,66 @@
                 Grid.Column="10"
                 MinWidth="90" />
       </Grid>
+
+      <!-- ISSUE #20: the net tools page. The XAML carries no visible strings —
+           src/app/tools_net.rs sets every label from the i18n dictionaries and
+           wires the controls by these names. -->
+      <TabControl x:Name="ToolsTabs"
+                  Grid.Row="2"
+                  Margin="0,8,0,0">
+        <TabItem x:Name="NetToolsTab">
+          <Grid RowDefinitions="Auto,Auto,Auto,Auto,*" Margin="4">
+            <StackPanel Grid.Row="0"
+                        Orientation="Horizontal"
+                        Spacing="6">
+              <ComboBox x:Name="NetProtocolSelector"
+                        MinWidth="100" />
+              <ComboBox x:Name="NetModeSelector"
+                        MinWidth="90" />
+              <CheckBox x:Name="NetCertCheck"
+                        VerticalAlignment="Center" />
+            </StackPanel>
+
+            <StackPanel Grid.Row="1"
+                        Orientation="Horizontal"
+                        Spacing="6"
+                        Margin="0,6,0,0">
+              <TextBox x:Name="NetHostBox"
+                       MinWidth="170" />
+              <TextBox x:Name="NetPortBox"
+                       MinWidth="80" />
+              <Button x:Name="NetStartButton"
+                      MinWidth="90" />
+            </StackPanel>
+
+            <StackPanel Grid.Row="2"
+                        Orientation="Horizontal"
+                        Spacing="6"
+                        Margin="0,6,0,0">
+              <CheckBox x:Name="NetBridgeCheck"
+                        VerticalAlignment="Center" />
+              <TextBlock x:Name="NetStatus"
+                         FontSize="12"
+                         VerticalAlignment="Center" />
+            </StackPanel>
+
+            <StackPanel Grid.Row="3"
+                        Orientation="Horizontal"
+                        Spacing="6"
+                        Margin="0,6,0,0">
+              <TextBox x:Name="NetSendBox"
+                       MinWidth="260" />
+              <Button x:Name="NetSendButton"
+                      MinWidth="70" />
+            </StackPanel>
+
+            <ListBox x:Name="NetLog"
+                     Grid.Row="4"
+                     FontSize="12"
+                     Margin="0,6,0,0" />
+          </Grid>
+        </TabItem>
+      </TabControl>
     </Grid>
 
     <!-- Right: the quick-send pages (10 pages, unlimited entries per page). -->
