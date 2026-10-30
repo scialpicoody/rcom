@@ -42,8 +42,15 @@ ferroui-themes-winui = { version = "=0.4.0-preview.1" }
 ferroui-view = { version = "=0.4.0-preview.1", features = ["desktop"] }
 
 # The core (src/core): the UI-agnostic serial engine. Only what the serial tracer
-# bullet needs; later slices add their own (mlua, rumqttc, rustls, encoding_rs, ...).
+# bullet needs; later slices add their own (rumqttc, rustls, encoding_rs, ...).
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# ISSUE #18 — the Lua engine (docs/design.md, "Lua layer"). `lua53` because llcom
+# runs xlua (Lua 5.3 semantics) and llcom scripts must run unmodified; `vendored`
+# builds the interpreter from source; `send` makes `Lua` Send+Sync so tokio timer
+# tasks can drive the VM; `async` for the pre-send hook seam (#19).
+mlua = { version = "0.10", features = ["lua53", "vendored", "send", "async"] }
+# ISSUE #18 — backs the serde-backed `JSON` builtin (docs/design.md "Lua layer").
+serde_json = "1"
 serialport = "4"
 chrono = "0.4"
 tracing = "0.1"
