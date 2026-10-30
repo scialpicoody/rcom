@@ -45,6 +45,14 @@ pub enum Command {
     /// Text from the send box, already encoded to wire bytes by the UI (the
     /// selector's encoding applies there, so the core stays encoding-agnostic).
     SendBytes(Vec<u8>),
+    /// The script panel's Run: (re)boots the standalone script VM with this code
+    /// (ticket #19). Output flows back as `~~` log rows.
+    RunScript { code: String },
+    /// The script panel's Stop: stops the standalone VM (instruction-count hook
+    /// unwinds even a hard loop).
+    StopScript,
+    /// Installs or clears the session's Lua pre-send hook (`None` = disabled).
+    SetHook(Option<String>),
 }
 
 /// One data chunk for the UI's log model: the raw bytes stay authoritative so an
@@ -142,8 +150,8 @@ fn start_engine() -> CoreHost {
 }
 
 /// What `RCOM_AUTODEMO` asks for: the basic `ping` path, the unplug/replug
-/// reconnect path, the GBK encoding path, the quick-send persistence path, or
-/// nothing.
+/// reconnect path, the GBK encoding path, the quick-send persistence path, the
+/// pre-send-hook path, the script-panel Run/Stop path, or nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutodemoMode {
     Off,
@@ -151,11 +159,14 @@ pub enum AutodemoMode {
     Encoding,
     Persist,
     Reconnect,
+    Hook,
+    Panel,
 }
 
 impl AutodemoMode {
     /// Reads `RCOM_AUTODEMO`: `1` = basic, `reconnect` = the unplug/replug path,
     /// `encoding` = the GBK path, `persist` = the quick-send persistence path,
+    /// `hook` = the pre-send-hook path, `panel` = the script-panel Run/Stop path,
     /// else off.
     pub fn from_env() -> Self {
         match std::env::var("RCOM_AUTODEMO").as_deref() {
@@ -163,6 +174,8 @@ impl AutodemoMode {
             Ok("reconnect") => Self::Reconnect,
             Ok("encoding") => Self::Encoding,
             Ok("persist") => Self::Persist,
+            Ok("hook") => Self::Hook,
+            Ok("panel") => Self::Panel,
             _ => Self::Off,
         }
     }
@@ -184,8 +197,11 @@ async fn driver(
     // unplug/replug cycle the reconnect machine survives; `RCOM_AUTODEMO=encoding`
     // sends 你好 as GBK bytes and then drives the encoding switch — the re-render
     // proof of ticket #17. (`=persist` is handled entirely on the UI side, see the
-    // controller.) `RCOM_LUADEMO=1` implies the basic path — the script VM boots
-    // on the MOCK0 open and feeds on its first RX chunk (ticket #18).
+    // controller.) `RCOM_AUTODEMO=hook` installs the `fromHex` pre-send hook and
+    // sends the hex *text* `414243` — the wire must see `41 42 43`; `=panel` runs
+    // the script-panel Run/Stop path headlessly. `RCOM_LUADEMO=1` implies the
+    // basic path — the script VM boots on the MOCK0 open and feeds on its first
+    // RX chunk (ticket #18).
     let mut awaiting_echo: Option<Vec<u8>> = None;
     // The reconnect demo: set once the machine reports Reopened, so the next RX
     // `ping` proves data flows across the unplug/replug.
@@ -244,6 +260,46 @@ async fn driver(
                 }
             });
         }
+        AutodemoMode::Hook => {
+            tracing::info!(
+                "RCOM_AUTODEMO=hook: driving the pre-send-hook demo path \
+                 ('414243' must reach the wire as 41 42 43)"
+            );
+            let demo = commands_tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = demo.send(Command::Open { name: MOCK_PORT_NAME.into(), baud: 115_200 });
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                // The llcom README hook, through the real UI command path.
+                let _ = demo.send(Command::SetHook(Some(
+                    rcom::core::lua::scripts::SEND_CONVERT_HEX.into(),
+                )));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                // Hex *text* in — the hook must convert before the writer.
+                let _ = demo.send(Command::SendBytes(b"414243".to_vec()));
+            });
+            // The echo comes back as the *converted* bytes "ABC".
+            awaiting_echo = Some(b"ABC".to_vec());
+        }
+        AutodemoMode::Panel => {
+            tracing::info!(
+                "RCOM_AUTODEMO=panel: driving the script-panel demo path \
+                 (Run boots the VM; Stop unwinds a hard loop)"
+            );
+            let demo = commands_tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                // The editor content, through the real Run command: prints once,
+                // then spins forever at the top level — the Stop button's
+                // instruction-count hook is the only way out.
+                let _ = demo.send(Command::RunScript {
+                    code: "print(\"panel demo running\")\nwhile true do end\n".into(),
+                });
+                // Give the print time to surface, then cut the loop down.
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+                let _ = demo.send(Command::StopScript);
+            });
+        }
         AutodemoMode::Encoding => {
             tracing::info!("RCOM_AUTODEMO=encoding: driving the GBK encoding demo path");
             let demo = commands_tx.clone();
@@ -267,19 +323,114 @@ async fn driver(
     // sample (uartReceive → publish → task replies "ok!", plus a 1s loop timer).
     let mut script_vm: Option<LuaRuntime> = None;
     let mut script_vm_fed = false;
+    // The script panel's standalone VM (ticket #19): Run replaces it, Stop stops
+    // it. Its output flows to the log view as `~~` rows; its uart writes go to
+    // the open session raw (the pre-send hook does not apply to script sends,
+    // llcom parity). VMs under construction report back through `panel_ready`;
+    // the generation counter rejects superseded runs.
+    let mut panel_vm: Option<LuaRuntime> = None;
+    let mut panel_generation: u64 = 0;
+    let (panel_ready_tx, mut panel_ready_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PanelVmReady>();
+    // The panel demo's two proofs: the Run print surfaced, the Stop unwound.
+    let mut panel_demo_ran = false;
+    let mut panel_stop_ok = false;
 
     let mut events = bus.subscribe();
     loop {
         tokio::select! {
             command = commands.recv() => match command {
                 None => break, // the host is gone: app shutting down
-                Some(command) => handle_command(&manager, &ui, command).await,
+                Some(command) => {
+                    handle_command(
+                        &manager,
+                        &ui,
+                        &bus,
+                        &mut panel_vm,
+                        &mut panel_generation,
+                        panel_ready_tx.clone(),
+                        command,
+                    )
+                    .await
+                }
+            },
+            ready = panel_ready_rx.recv() => match ready {
+                None => break, // the sender is gone: app shutting down
+                Some(arriving) => {
+                    if arriving.generation == panel_generation {
+                        match arriving.vm {
+                            Ok(vm) if !vm.is_stopped() => {
+                                tracing::info!(
+                                    generation = arriving.generation,
+                                    "script panel: VM started"
+                                );
+                                panel_vm = Some(vm);
+                            }
+                            Ok(vm) => {
+                                // A Stop outran this VM's start: keep it stopped.
+                                vm.stop();
+                            }
+                            Err(error) => {
+                                let _ = ui.send(UiMsg::Row {
+                                    text: rust_i18n::t!("script_run_failed", error = &error).to_string(),
+                                    direction: None,
+                                });
+                            }
+                        }
+                    } else if let Ok(vm) = arriving.vm {
+                        // Superseded while loading: stop it before it runs.
+                        vm.stop();
+                    }
+                }
             },
             event = events.recv() => match event {
                 Ok(event) => {
+                    // Script-panel demo evidence: the Run command booted the
+                    // standalone VM (its print surfaced), and the Stop command
+                    // unwound the spinning script — the only writer of the stop
+                    // flag is `Command::StopScript`, so a "script stopped" error
+                    // is proof of the whole Stop path.
+                    if mode == AutodemoMode::Panel {
+                        if let Event::ScriptOut(out) = &event {
+                            match &out.kind {
+                                ScriptOutKind::Print { line }
+                                    if !panel_demo_ran && line.contains("panel demo running") =>
+                                {
+                                    panel_demo_ran = true;
+                                    tracing::info!(
+                                        "AUTODEMO PANEL RUN OK: the standalone VM adopted the \
+                                         Run command and executed the script (print surfaced as \
+                                         a `~~` row)"
+                                    );
+                                }
+                                ScriptOutKind::Error { message }
+                                    if message.contains("script stopped") && !panel_stop_ok =>
+                                {
+                                    panel_stop_ok = true;
+                                    tracing::info!(
+                                        "AUTODEMO PANEL STOP OK: the spinning script unwound \
+                                         through the instruction-count hook ({message})"
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     // Autodemo evidence in the trace log: the sent bytes came back
                     // over the mock as RX — send→port→bus proven for this run.
                     if let Event::Data(data) = &event {
+                        // Hook demo, TX side: the hex *text* `414243` hit the
+                        // wire as the converted bytes 41 42 43 — the Lua
+                        // pre-send hook transformed the TX before the writer.
+                        if mode == AutodemoMode::Hook
+                            && data.direction == Direction::Tx
+                            && data.bytes.as_slice() == b"ABC"
+                        {
+                            tracing::info!(
+                                "AUTODEMO HOOK OK: TX '414243' reached the wire as 41 42 43 \
+                                 ('ABC') — the fromHex pre-send hook transformed the send"
+                            );
+                        }
                         if let Some(expected) = &awaiting_echo {
                             if data.direction == Direction::Rx
                                 && data.bytes.as_slice() == expected.as_slice()
@@ -385,10 +536,30 @@ async fn driver(
             },
         }
     }
-    // The VM is dropped with the driver; its timers abort and the tokio runtime
-    // shuts down with the process.
+    // The VMs are dropped with the driver; their timers abort and the tokio
+    // runtime shuts down with the process.
     if let Some(vm) = script_vm {
         vm.stop();
+    }
+    if let Some(vm) = panel_vm {
+        vm.stop();
+    }
+}
+
+/// The sink for script VMs' `apiSendUartData`: raw writes to the open session.
+/// Raw on purpose (llcom parity): the pre-send hook transforms *UI* sends; a
+/// script's uart writes are already final and must not be converted twice.
+struct ScriptSink(Arc<PortManager>);
+
+impl UartSink for ScriptSink {
+    fn send_uart(&self, bytes: Vec<u8>) -> bool {
+        let manager = Arc::clone(&self.0);
+        tokio::spawn(async move {
+            if let Err(error) = manager.write_raw(bytes).await {
+                tracing::warn!("script uart send failed: {error}");
+            }
+        });
+        true
     }
 }
 
@@ -401,25 +572,10 @@ fn start_demo_vm(
     session_id: u64,
     ui: &std::sync::mpsc::Sender<UiMsg>,
 ) -> Option<LuaRuntime> {
-    /// Bridges the VM's uart channel to the session writer.
-    struct DemoSink(Arc<PortManager>);
-
-    impl UartSink for DemoSink {
-        fn send_uart(&self, bytes: Vec<u8>) -> bool {
-            let manager = Arc::clone(&self.0);
-            tokio::spawn(async move {
-                if let Err(error) = manager.write(bytes).await {
-                    tracing::warn!("script uart send failed: {error}");
-                }
-            });
-            true
-        }
-    }
-
     match LuaRuntime::start(
         bus,
         Some(session_id),
-        Some(Arc::new(DemoSink(Arc::clone(manager)))),
+        Some(Arc::new(ScriptSink(Arc::clone(manager)))),
         rcom::core::lua::scripts::LLCOM_README_SAMPLE,
     ) {
         Ok(vm) => Some(vm),
@@ -433,7 +589,68 @@ fn start_demo_vm(
     }
 }
 
-async fn handle_command(manager: &PortManager, ui: &std::sync::mpsc::Sender<UiMsg>, command: Command) {
+/// Stops the script panel's VM, if one is running. Never blocks: the stop flag
+/// plus the instruction-count hook unwind even a hard loop, and the dying VM's
+/// thread finishes on its own (the handle was cloned into it).
+fn stop_panel_vm(panel_vm: &Option<LuaRuntime>) {
+    if let Some(vm) = panel_vm {
+        tracing::info!("script panel: stopping the running VM");
+        vm.stop();
+    }
+}
+
+/// A freshly created script-panel VM on its way to the driver: the driver adopts
+/// it (into `panel_vm`) when the generation is still current, else stops it —
+/// a newer Run/Stop superseded this one.
+struct PanelVmReady {
+    generation: u64,
+    vm: mlua::Result<LuaRuntime>,
+}
+
+/// Boots the script panel's standalone VM (the Run button): [`LuaRuntime::create`]
+/// is bounded setup (sandbox + host API + head.lua, no user code); the handle is
+/// reported to the driver *before* the script chunk runs, so the Stop button holds
+/// the stop switch even while a script spins at load. Run errors surface as `~~`
+/// rows through the bus ([`LuaRuntime::run_script`] reports them); a create
+/// failure rides back on the message. Never blocks the driver.
+fn spawn_panel_vm(
+    manager: &Arc<PortManager>,
+    bus: EventBus,
+    code: String,
+    generation: u64,
+    ready: tokio::sync::mpsc::UnboundedSender<PanelVmReady>,
+) {
+    let sink = Arc::new(ScriptSink(Arc::clone(manager))) as Arc<dyn UartSink>;
+    tokio::task::spawn_blocking(move || {
+        let vm = LuaRuntime::create(bus, None, Some(sink));
+        let Ok(reportable) = vm else {
+            // `create` failing is an engine bug (sandbox/head.lua are embedded);
+            // surface it and give up on this run.
+            let _ = ready.send(PanelVmReady {
+                generation,
+                vm: Err(mlua::Error::runtime("script VM bootstrap failed")),
+            });
+            return;
+        };
+        let _ = ready.send(PanelVmReady {
+            generation,
+            vm: Ok(reportable.clone()),
+        });
+        // Run errors are published on the bus by `run_script` itself (`~~` rows);
+        // the handle on the driver side keeps the stop switch armed meanwhile.
+        let _ = reportable.run_script(&code);
+    });
+}
+
+async fn handle_command(
+    manager: &Arc<PortManager>,
+    ui: &std::sync::mpsc::Sender<UiMsg>,
+    bus: &EventBus,
+    panel_vm: &mut Option<LuaRuntime>,
+    panel_generation: &mut u64,
+    panel_ready: tokio::sync::mpsc::UnboundedSender<PanelVmReady>,
+    command: Command,
+) {
     match command {
         Command::RefreshPorts => match manager.list_ports().await {
             Ok(ports) => {
@@ -463,6 +680,39 @@ async fn handle_command(manager: &PortManager, ui: &std::sync::mpsc::Sender<UiMs
                 });
             }
         }
+        Command::RunScript { code } => {
+            // A fresh VM per run: stop the old one first, so `taskInit`ed tasks
+            // and loop timers never survive a re-run.
+            stop_panel_vm(panel_vm);
+            *panel_vm = None;
+            *panel_generation += 1;
+            spawn_panel_vm(manager, bus.clone(), code, *panel_generation, panel_ready);
+        }
+        Command::StopScript => {
+            stop_panel_vm(panel_vm);
+            *panel_vm = None;
+            *panel_generation += 1; // an in-flight start arrives to be stopped
+            let _ = ui.send(UiMsg::Row {
+                text: rust_i18n::t!("script_stopped").to_string(),
+                direction: None,
+            });
+        }
+        Command::SetHook(script) => match script {
+            Some(code) => {
+                manager.set_hook(Some(rcom::core::lua::TxHook::new(code.clone())));
+                let _ = ui.send(UiMsg::Row {
+                    text: rust_i18n::t!("tx_hook_on", script = &code).to_string(),
+                    direction: None,
+                });
+            }
+            None => {
+                manager.set_hook(None);
+                let _ = ui.send(UiMsg::Row {
+                    text: rust_i18n::t!("tx_hook_off").to_string(),
+                    direction: None,
+                });
+            }
+        },
     }
 }
 
