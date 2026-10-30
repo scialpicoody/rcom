@@ -25,6 +25,12 @@ pub enum CoreError {
 
     #[error("an engine channel closed unexpectedly")]
     ChannelClosed,
+
+    /// The Lua pre-send hook rejected the send (contract §2.4 `SessionError::Hook`):
+    /// the conversion script failed (or hit its watchdog). The UI surfaces the
+    /// message as a log row; the bytes never reach the wire.
+    #[error("lua tx hook: {0}")]
+    Hook(String),
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
