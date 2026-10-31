@@ -46,6 +46,18 @@ pub trait UartSink: Send + Sync {
     fn send_uart(&self, bytes: Vec<u8>) -> bool;
 }
 
+/// Where `apiQuickSendList(id)` reads the quick-send entries (parity sweep,
+/// ticket #26: the llcom API reads the *live* quick-send list; rcom's store
+/// lives app-side, so the VM takes a provider instead — the [`UartSink`]
+/// pattern). Implementations are read-only lookups; llcom semantics: `id` is
+/// 1-based over the flattened pages, out-of-range yields `None` (the binding
+/// returns `""`, which head.lua's wrapper turns into `nil`).
+pub trait QuickSendLookup: Send + Sync {
+    /// The entry `id` (1-based): `Some((hex, payload))` — `hex` marks a hex
+    /// payload (head.lua converts it with `fromHex`); `None` out of range.
+    fn entry(&self, id: i64) -> Option<(bool, String)>;
+}
+
 /// A no-op sink for VMs without a serial session (standalone script panel).
 pub struct DetachedSink;
 
@@ -79,6 +91,10 @@ pub struct Inner {
     /// Live one-shot timers (llcom's `LuaRunEnv.pool`): `apiStartTimer` id → handle.
     pub timers: Mutex<HashMap<i64, tokio::task::AbortHandle>>,
     pub sink: Option<Arc<dyn UartSink>>,
+    /// The quick-send provider (`apiQuickSendList`): installed any time before
+    /// the script calls it (the binding reads it per call); `None` keeps the
+    /// llcom out-of-range shape (`""` → `nil` via head.lua).
+    pub quicksend: Mutex<Option<Arc<dyn QuickSendLookup>>>,
 }
 
 impl Inner {
@@ -196,6 +212,7 @@ impl LuaRuntime {
             stop: Arc::new(AtomicBool::new(false)),
             timers: Mutex::new(HashMap::new()),
             sink,
+            quicksend: Mutex::new(None),
         });
         install_host_api(&lua, Arc::clone(&inner))?;
         // The `rcom.net` one-shot table (issue #20), next to the api* builtins.
@@ -251,6 +268,14 @@ impl LuaRuntime {
     /// this for every RX chunk).
     pub fn feed_uart(&self, bytes: &[u8]) {
         self.inner.trigger(-1, "uart", Some(bytes.to_vec()));
+    }
+
+    /// Installs the quick-send provider `apiQuickSendList(id)` reads (parity
+    /// sweep #26). Callable any time before the script queries it: the binding
+    /// resolves the provider per call, so the head.lua wrapper (installed at
+    /// create) sees the real entries either way.
+    pub fn set_quicksend_lookup(&self, lookup: Option<Arc<dyn QuickSendLookup>>) {
+        *self.inner.quicksend.lock().unwrap() = lookup;
     }
 
     /// Whether `name` is a function global in this VM (the plot decoder host
@@ -390,11 +415,30 @@ fn install_host_api(lua: &Lua, inner: Arc<Inner>) -> mlua::Result<()> {
         })?,
     )?;
 
-    // apiQuickSendList(id) — "" until ticket #19 wires the quick-send store;
-    // head.lua's wrapper turns "" into nil, exactly like llcom out-of-range.
+    // apiQuickSendList(id) — the quick-send entries through the installed
+    // [`QuickSendLookup`] (parity sweep #26: wired to the real store, no longer
+    // the `""` stub). llcom semantics: 1-based id over the flattened pages;
+    // string entries go out as `S{payload}`, hex entries as `H{payload}` —
+    // head.lua's wrapper strips the prefix (`H` additionally `fromHex`es) and
+    // turns everything else (the out-of-range `""`) into `nil`. Without a
+    // provider (a VM booted before one was installed) the shape stays llcom's
+    // out-of-range: `""` → `nil`.
+    let quicksend_inner = Arc::clone(&inner);
     globals.set(
         "apiQuickSendList",
-        lua.create_function(|_, _id: i64| Ok(String::new()))?,
+        lua.create_function(move |_, id: i64| {
+            let entry = quicksend_inner
+                .quicksend
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|lookup| lookup.entry(id));
+            Ok(match entry {
+                Some((true, payload)) => format!("H{payload}"),
+                Some((false, payload)) => format!("S{payload}"),
+                None => String::new(),
+            })
+        })?,
     )?;
 
     // __armStopHook(co) — used by head.lua's coroutine.resume override so task
@@ -822,6 +866,42 @@ mod tests {
         assert!(json_line.contains("1") && json_line.contains("hi") && json_line.contains("3"), "{json_line}");
         let encoded = outbox.next_print_matching(Duration::from_secs(2), "key");
         assert!(encoded.contains("\"key\":\"v\""), "{encoded}");
+        runtime.stop();
+    }
+
+    /// The quick-send provider reaches the script (parity sweep #26): llcom's
+    /// head.lua wrapper strips the `S`/`H` prefixes — text entries arrive
+    /// verbatim, hex entries arrive `fromHex`ed, and out-of-range ids are `nil`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn api_quick_send_list_reads_the_provider() {
+        struct Fixed;
+        impl QuickSendLookup for Fixed {
+            fn entry(&self, id: i64) -> Option<(bool, String)> {
+                match id {
+                    1 => Some((false, "ping\r\n".into())),
+                    2 => Some((true, "41 42".into())),
+                    _ => None,
+                }
+            }
+        }
+        let outbox = OutBox::new();
+        let runtime = LuaRuntime::create(outbox.bus.clone(), None, None).expect("VM boots");
+        runtime.set_quicksend_lookup(Some(Arc::new(Fixed)));
+        runtime.run_script(
+            r#"
+            print(tostring(apiQuickSendList(1)))
+            print(tostring(apiQuickSendList(2)))
+            local missing = apiQuickSendList(9)
+            print(tostring(missing))
+        "#,
+        )
+        .expect("quick-send script must run");
+        let first = outbox.next_print_matching(Duration::from_secs(2), "ping");
+        assert!(first.contains("ping\r\n"), "{first}");
+        let second = outbox.next_print_matching(Duration::from_secs(2), "AB");
+        assert!(second.contains("AB"), "hex entry must arrive fromHexed: {second}");
+        let third = outbox.next_print_matching(Duration::from_secs(2), "nil");
+        assert!(third.contains("nil"), "out-of-range must be nil: {third}");
         runtime.stop();
     }
 }
