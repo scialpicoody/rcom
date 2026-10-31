@@ -264,6 +264,42 @@ impl LogStore {
                     plot.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
                 ));
             }
+            Event::Monitor(monitor) => {
+                // Monitor relay traffic joins the session file with the tool's
+                // own marker (issue #23); direction is relative to the monitored
+                // app (llcom's Send/Receive view). Like the other tools, the
+                // ring buffer stays serial-only.
+                use crate::core::monitor::{MonitorDirection, MonitorEventKind};
+                let line = match &monitor.kind {
+                    MonitorEventKind::Started { virtual_port, upstream } => {
+                        format!(
+                            "==  [mon#{}] virtual port {virtual_port} ⇄ {upstream}",
+                            monitor.monitor_id
+                        )
+                    }
+                    MonitorEventKind::Stopped { .. } => {
+                        format!("==  [mon#{}] stopped", monitor.monitor_id)
+                    }
+                    MonitorEventKind::Error { message } => {
+                        format!("!!  [mon#{}] error: {message}", monitor.monitor_id)
+                    }
+                    MonitorEventKind::Data { direction, bytes } => {
+                        let tag = match direction {
+                            MonitorDirection::Tx => "TX",
+                            MonitorDirection::Rx => "RX",
+                        };
+                        format!(
+                            "{tag}  [mon#{}] {}",
+                            monitor.monitor_id,
+                            crate::core::codec::hex_spaced(bytes.as_slice())
+                        )
+                    }
+                };
+                self.write_line(format!(
+                    "{}  ~~  {line}",
+                    monitor.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
+                ));
+            }
         }
     }
 

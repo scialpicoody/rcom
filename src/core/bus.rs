@@ -180,6 +180,13 @@ pub enum Event {
     /// Plot pipeline (issue #24): decoder lifecycle notices. Additive — the
     /// per-point data path is the plot store, not the bus.
     Plot(PlotEvent),
+    /// Serial monitor (issue #23): relay lifecycle and captured traffic of the
+    /// pty-proxy monitors. Additive — refines the contract §1 sketch
+    /// `Event::Monitor(MonitorEvent)`; the schema is owned by the monitor
+    /// ticket. Capture chunks carry their direction (relative to the monitored
+    /// app) and timestamp; the ring buffer stays serial-only (the durable file
+    /// gets the tool-marked rows, like the net/MQTT tools).
+    Monitor(crate::core::monitor::MonitorEvent),
 }
 
 /// The sending half of the event bus. Clones subscribe new consumers through
@@ -272,6 +279,7 @@ mod tests {
                 Event::Net(_) => "net".into(),
                 Event::Mqtt(_) => "mqtt".into(),
                 Event::Plot(_) => "plot".into(),
+                Event::Monitor(_) => "monitor".into(),
             })
             .collect();
 
