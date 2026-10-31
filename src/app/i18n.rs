@@ -1,7 +1,11 @@
 //! Locale selection: the i18n dictionaries live in `locales/` (loaded by
-//! `rust_i18n::i18n!` in the crate root); this module picks the active locale at
-//! startup. `RCOM_LANG` wins (`zh`/`en`), else the process locale is derived from
-//! `LANG`/`LC_ALL` (any `zh*` prefix), else English.
+//! `rust_i18n::i18n!` in the crate root); this module picks the active locale.
+//! Precedence: `RCOM_LANG` (`zh`/`en`, the demo/smoke override), else the
+//! persisted setting (ticket #25 — `en`/`zh`; `system` follows the OS), else
+//! the process locale derived from `LANG`/`LC_ALL` (any `zh*` prefix), else
+//! English.
+
+use super::settings::LanguageMode;
 
 /// The locales rcom ships dictionaries for.
 pub const SUPPORTED: [&str; 2] = ["en", "zh"];
@@ -12,12 +16,35 @@ pub fn init_locale() {
 }
 
 /// The locale to use: `RCOM_LANG` if it names a shipped dictionary, else the
-/// system locale's language part when shipped, else `"en"`.
+/// persisted setting when it names one, else the system locale's language
+/// part when shipped, else `"en"`.
 pub fn pick_locale() -> String {
-    pick_from(
-        std::env::var("RCOM_LANG").ok(),
-        std::env::var("LC_ALL").or_else(|_| std::env::var("LANG")).ok(),
-    )
+    let env = std::env::var("RCOM_LANG").ok();
+    let setting = super::settings::global()
+        .map(|settings| settings.language)
+        .unwrap_or(LanguageMode::System)
+        .locale_id()
+        .map(str::to_string);
+    if env.is_some() {
+        // The environment override wins over everything.
+        return pick_from(env, system_locale_input());
+    }
+    if setting.is_some() {
+        return pick_from(setting, system_locale_input());
+    }
+    pick_from(None, system_locale_input())
+}
+
+/// The system locale's raw input (`LC_ALL`, else `LANG`) — what the settings
+/// page's Follow-OS mode resolves through when the user switches live.
+pub fn system_locale_input() -> Option<String> {
+    std::env::var("LC_ALL").or_else(|_| std::env::var("LANG")).ok()
+}
+
+/// The locale the system names (the Follow-OS resolution; usable at runtime,
+/// not just startup).
+pub fn system_locale() -> String {
+    pick_from(None, system_locale_input())
 }
 
 /// The pure decision behind [`pick_locale`]: `rcom_lang` overrides the system

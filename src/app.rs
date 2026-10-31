@@ -5,13 +5,16 @@ pub(crate) mod controller;
 mod host;
 pub(crate) mod i18n;
 pub(crate) mod plot_view;
-mod quicksend;
+pub(crate) mod quicksend;
 pub(crate) mod scriptstore;
+pub(crate) mod settings;
+pub(crate) mod theme;
 mod tools_net;
 mod tools_mqtt;
 mod tools_monitor;
 mod tools_plot;
 mod tools_codec;
+mod tools_settings;
 
 use crate::main_window::MainWindow;
 use ferroui_base::{
