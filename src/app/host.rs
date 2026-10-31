@@ -86,6 +86,9 @@ pub enum UiMsg {
     /// A net-tools event (issue #20); the tools page consumes it and the row
     /// text also lands in the main log view.
     Net(rcom::core::nettools::NetEvent),
+    /// An MQTT-tool event (issue #21); the tools page consumes it and the row
+    /// text also lands in the main log view.
+    Mqtt(rcom::core::mqtt::MqttEvent),
 }
 
 /// The process-wide handle the UI thread uses to reach the core. `ui_rx` is drained
@@ -142,6 +145,21 @@ fn start_engine() -> CoreHost {
                     tokio::spawn(rcom::core::nettools::demo::run(
                         driver_bus.clone(),
                         net_hub,
+                        Some(Arc::clone(&manager)),
+                    ));
+                }
+                // ISSUE #21: the process-global MQTT hub (sessions + bridge)
+                // and, when requested, the MQTT autodemo (in-process mock
+                // broker — no external broker needed).
+                let mqtt_hub = rcom::core::mqtt::hub::init_global(
+                    driver_bus.clone(),
+                    Arc::clone(&manager),
+                );
+                if rcom::core::mqtt::demo::MqttDemoMode::from_env() != rcom::core::mqtt::demo::MqttDemoMode::Off
+                {
+                    tokio::spawn(rcom::core::mqtt::demo::run(
+                        driver_bus.clone(),
+                        mqtt_hub,
                         Some(Arc::clone(&manager)),
                     ));
                 }
@@ -543,6 +561,18 @@ async fn driver(
                                 break; // UI gone
                             }
                         }
+                        // ISSUE #21: MQTT events, same treatment as the net
+                        // tools — main-log echo row plus the page's own message.
+                        Event::Mqtt(mqtt) => {
+                            let row = super::tools_mqtt::format_mqtt_row(mqtt);
+                            tracing::debug!(target: "rcom::rows", "{row}");
+                            if ui.send(UiMsg::Row { text: row, direction: None }).is_err() {
+                                break; // UI gone
+                            }
+                            if ui.send(UiMsg::Mqtt(mqtt.clone())).is_err() {
+                                break; // UI gone
+                            }
+                        }
                         Event::Port(_) | Event::Log(_) | Event::ScriptOut(_) => {
                             if let Some(row) = render_event(&event) {
                                 tracing::debug!(target: "rcom::rows", "{row}");
@@ -747,9 +777,9 @@ async fn handle_command(
 }
 
 /// Turns a non-data bus event into the row the log view shows (data chunks travel
-/// to the UI as raw [`DataRowMsg`]s and are rendered there, per encoding; net
-/// events are rendered in the driver's event arm — they carry their own row
-/// shape and also go to the tools page).
+/// to the UI as raw [`DataRowMsg`]s and are rendered there, per encoding; net and
+/// MQTT events are rendered in the driver's event arm — they carry their own row
+/// shape and also go to the tools pages).
 pub fn render_event(event: &Event) -> Option<String> {
     match event {
         Event::Data(_) => None,
@@ -757,6 +787,7 @@ pub fn render_event(event: &Event) -> Option<String> {
         Event::Log(log) => Some(format_log_row(log)),
         Event::ScriptOut(out) => Some(format_script_row(out)),
         Event::Net(_) => None,
+        Event::Mqtt(_) => None,
     }
 }
 
