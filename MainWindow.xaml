@@ -197,6 +197,74 @@
         </Grid>
       </TabItem>
 
+  <!-- TERMINAL-SPLICE: ticket #34 — the Terminal page (keyboard direct-send),
+       design-ui §4.3, position 2 of the bottom strip (§2.2). This TabItem
+       replaces lane1/37's TerminalTab placeholder as-is: it is fully
+       self-contained (no shared-file coupling). src/app/tools_terminal.rs
+       resolves these names, sets every label from the i18n dictionaries and
+       wires the events; the capture strip is built in code into
+       TerminalCaptureHost (a plain focusable Control — the pin's key-capture
+       reality: no TextBox, whose class handling would eat Enter/Tab/arrows).
+       The XAML carries no visible strings. -->
+  <TabItem x:Name="TerminalTab">
+    <Grid RowDefinitions="Auto,*,Auto,Auto" Margin="4">
+      <!-- Header row: the newline selector (Enter's byte form), the
+           local-echo toggle (the header's secondary control) and the status
+           line. The send surface is the action — no primary button (§4.3). -->
+      <StackPanel Grid.Row="0"
+                  Orientation="Horizontal"
+                  Spacing="6">
+        <TextBlock x:Name="TerminalNewlineCaption"
+                   VerticalAlignment="Center"
+                   FontSize="12" />
+        <ComboBox x:Name="TerminalNewlineSelector"
+                  MinWidth="84" />
+        <CheckBox x:Name="TerminalEchoCheck"
+                  VerticalAlignment="Center" />
+        <TextBlock x:Name="TerminalStatus"
+                   FontSize="12"
+                   VerticalAlignment="Center" />
+      </StackPanel>
+
+      <!-- The page's view: the local echo of the captured keys (toggle, off
+           by default) — distinct from the session log rows, which stay the
+           traffic surface (§4.3: the page is an input surface, not a second
+           log). The empty state rides over it while the session is Closed:
+           "Open the port to start the terminal" + the dim hint. -->
+      <Grid Grid.Row="1" Margin="0,6,0,0">
+        <ListBox x:Name="TerminalEchoView"
+                 FontSize="13" />
+        <StackPanel x:Name="TerminalEmpty"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center">
+          <TextBlock x:Name="TerminalEmptyCaption"
+                     FontSize="12"
+                     TextAlignment="Center" />
+          <TextBlock x:Name="TerminalEmptyHint"
+                     FontSize="11"
+                     Opacity="0.6"
+                     TextAlignment="Center" />
+        </StackPanel>
+      </Grid>
+
+      <!-- The capture strip lands here (a focusable custom control added in
+           code — click to capture; every key goes to the port). -->
+      <Grid x:Name="TerminalCaptureHost"
+            Grid.Row="2"
+            Height="44"
+            Margin="0,6,0,0" />
+
+      <!-- The mapping note (the AC's "document the mapping table in the
+           page's status area"). -->
+      <TextBlock x:Name="TerminalMappingNote"
+                 Grid.Row="3"
+                 FontSize="11"
+                 Opacity="0.6"
+                 Margin="0,4,0,0"
+                 TextWrapping="Wrap" />
+    </Grid>
+  </TabItem>
+
       <!-- The net tools page (ticket #20). The XAML carries no visible strings —
            src/app/tools_net.rs sets every label from the i18n dictionaries and
            wires the controls by these names. -->
