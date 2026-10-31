@@ -315,18 +315,23 @@ impl CodecPage {
     /// selection applies the candidate to the output box.
     fn run_recover(&self, text: &str) -> Result<String, String> {
         let found = recover_garbled(text);
-        let mut recovery = self.recovery.borrow_mut();
-        *recovery = found;
+        let count = found.len();
+        {
+            let mut recovery = self.recovery.borrow_mut();
+            *recovery = found;
+        } // the borrow is gone before the list is touched: item mutations may
+          // fire selection events, and the handler borrows this too
         let items = self.candidates.items();
         items.clear();
-        for candidate in recovery.iter() {
-            let value: BoxedValue = Rc::new(candidate_row(candidate));
+        for index in 0..count {
+            let row = candidate_row(&self.recovery.borrow()[index]);
+            let value: BoxedValue = Rc::new(row);
             items.add(Some(value));
         }
-        if recovery.is_empty() {
+        if count == 0 {
             return Ok(t!("codec_status_no_candidates").to_string());
         }
-        Ok(t!("codec_status_candidates", n = recovery.len()).to_string())
+        Ok(t!("codec_status_candidates", n = count).to_string())
     }
 
     /// A candidate row was clicked: apply its result to the output box.

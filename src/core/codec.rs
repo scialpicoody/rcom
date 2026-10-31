@@ -871,6 +871,33 @@ mod tests {
         assert_eq!(scores, sorted);
     }
 
+    /// The AC's cross-product: for every ordered charset pair (all 25, diagonals
+    /// included), a sample every charset represents transcodes there and back
+    /// with byte-faithful results — the round trip recovers the exact bytes.
+    #[test]
+    fn transcode_round_trips_across_charset_pairs() {
+        // Verified to be encodable in every one of the five (see
+        // `unencodable_characters_are_reported` for the non-coverage case).
+        let sample = "好中日串口，一目了 123";
+        for from in TextEncoding::all() {
+            let EncodeOutcome { bytes: original, unencodable } = encode_text(sample, *from);
+            assert!(unencodable.is_empty(), "{} should cover the sample", from.id());
+            for to in TextEncoding::all() {
+                let there = transcode(&original, *from, *to);
+                assert!(
+                    !there.decode_replacements,
+                    "{} → {} decoded with replacements",
+                    from.id(),
+                    to.id()
+                );
+                assert!(there.unencodable.is_empty(), "{} → {}", from.id(), to.id());
+                let back = transcode(&there.bytes, *to, *from);
+                assert_eq!(back.text, sample, "{} → {} → {}", from.id(), to.id(), from.id());
+                assert_eq!(back.bytes, original, "{} → {} → {}", from.id(), to.id(), from.id());
+            }
+        }
+    }
+
     /// A lossy mis-display cannot be conjured back: the U+FFFD candidates sink,
     /// and pure ASCII produces no candidates at all (nothing to fix).
     #[test]
