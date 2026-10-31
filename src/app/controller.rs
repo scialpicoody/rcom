@@ -152,6 +152,9 @@ pub struct MainController {
     terminal_empty: Ref<TextBlock>,
     // The `+` port picker flyout (mounted once, content rebuilt per listing).
     picker_flyout: RefCell<Option<Ref<Flyout>>>,
+    // The tab-close confirm flyout (the §4.1 confirm for tabs with open ports;
+    // built lazily, shown from the ✕ handler).
+    close_tab_flyout: RefCell<Option<Ref<Flyout>>>,
     /// The window-closing subscription (dropping it unsubscribes the guard).
     _closing_guard: RefCell<Option<Rc<dyn IDisposable>>>,
     // State.
@@ -257,6 +260,7 @@ impl MainController {
             terminal_status: NameScopeExtensions::get(element, "TerminalStatus"),
             terminal_empty: NameScopeExtensions::get(element, "TerminalEmpty"),
             picker_flyout: RefCell::new(None),
+            close_tab_flyout: RefCell::new(None),
             _closing_guard: RefCell::new(None),
             tabs: RefCell::new(Vec::new()),
             active: Cell::new(0),
@@ -580,8 +584,61 @@ impl MainController {
             .and_then(|container| container.cast::<TabItem>())
     }
 
-    /// Closes the active tab: an open port rides the quit-guard pattern
-    /// (Mechanism B — the tab's port closes, the session drops, never hangs).
+    /// The ✕ handler: a tab with an open port confirms first (§4.1's
+    /// destructive list — "close session tab with open ports"); a closed tab
+    /// closes straight away.
+    fn close_tab_clicked(&self) {
+        if self.open_session_count() == 0 {
+            self.close_active_tab();
+            return;
+        }
+        let flyout = {
+            let mut mounted = self.close_tab_flyout.borrow_mut();
+            match mounted.as_ref() {
+                Some(flyout) => flyout.clone(),
+                None => {
+                    let flyout = Flyout::new();
+                    let panel = StackPanel::new();
+                    panel.set_orientation(Orientation::Vertical);
+                    panel.set_spacing(12.0);
+                    let text = TextBlock::new();
+                    text.set_text(Some(&t!("confirm_close_tab")));
+                    text.set_max_width(280.0);
+                    text.set_text_wrapping(ferroui_base::media::TextWrapping::Wrap);
+                    panel.children().add(text.upcast::<Control>());
+                    let row = StackPanel::new();
+                    row.set_orientation(Orientation::Horizontal);
+                    row.set_spacing(8.0);
+                    row.set_horizontal_alignment(ferroui_base::layout::HorizontalAlignment::Right);
+                    let cancel = Button::new();
+                    cancel.set_content(Some(Rc::new(t!("cancel").to_string())));
+                    let flyout_for_cancel = flyout.clone();
+                    cancel.add_handler(Button::click_event(), move |_, _| {
+                        flyout_for_cancel.set_is_open(false);
+                    });
+                    row.children().add(cancel.upcast::<Control>());
+                    let confirm = Button::new();
+                    confirm.set_content(Some(Rc::new(t!("close_tab").to_string())));
+                    ui_patterns::accent(&confirm);
+                    let this = self.self_handle().expect("controller handle (pump running)");
+                    let flyout_for_confirm = flyout.clone();
+                    confirm.add_handler(Button::click_event(), move |_, _| {
+                        flyout_for_confirm.set_is_open(false);
+                        this.close_active_tab();
+                    });
+                    row.children().add(confirm.upcast::<Control>());
+                    panel.children().add(row.upcast::<Control>());
+                    flyout.set_content(Some(Control::boxed(panel)));
+                    *mounted = Some(flyout.clone());
+                    flyout
+                }
+            }
+        };
+        flyout.show_at(&self.close_tab);
+    }
+
+    /// Closes the active tab: an open port rides the confirm above (Mechanism
+    /// B — the tab's port closes, the session drops, never hangs).
     fn close_active_tab(&self) {
         let index = self.active.get();
         let Some(vm) = self.active_vm() else { return };
@@ -791,9 +848,13 @@ impl MainController {
 
     fn update_shown_status(&self) {
         let Some(vm) = self.active_vm() else { return };
-        let (shown, total) = vm.borrow().shown_status();
+        let ((shown, total), follow) = {
+            let vm = vm.borrow();
+            (vm.shown_status(), vm.follow)
+        };
+        let word = if follow { t!("follow_on") } else { t!("follow_paused") };
         let status = t!("shown_status", shown = shown, total = total);
-        self.shown_status.set_text(Some(&status));
+        self.shown_status.set_text(Some(&format!("{status} · {word}")));
     }
 
     fn set_follow(&self, on: bool) {
@@ -808,15 +869,7 @@ impl MainController {
     /// The status word of the follow model: `follow on` / `PAUSED` (scrolling
     /// up auto-disengages; no pause-on-hover, §3.3).
     fn sync_follow_status_word(&self) {
-        let Some(vm) = self.active_vm() else { return };
-        let on = vm.borrow().follow;
-        let word = if on { t!("follow_on") } else { t!("follow_paused") };
-        let existing = self.shown_status.text().unwrap_or_default();
-        // The shown-status text is "shown N / M rows"; the follow word rides
-        // after it, separated by ` · `.
-        let base = existing.split(" · ").next().unwrap_or_default().to_string();
-        let text = format!("{base} · {word}");
-        self.shown_status.set_text(Some(&text));
+        self.update_shown_status();
     }
 
     fn set_hide_sent(&self, on: bool) {
@@ -945,13 +998,26 @@ impl MainController {
 
     /// One quick-send entry, clicked: its payload to the same TX path as the
     /// send box — text encodes with the session's encoding, hex parses to raw
-    /// bytes (the hook applies — entries ride the session TX path, §3.5).
+    /// bytes (the hook applies — entries ride the session TX path, §3.5). The
+    /// store's current payload wins (edit-in-place writes through).
     fn send_quick_entry(&self, entry: QuickSendEntry) {
         let Some(vm) = self.active_vm() else { return };
         let (encoding, session_id) = {
             let vm = vm.borrow();
             (vm.encoding, vm.current_session())
         };
+        // The row button passes the label/hex flag; the payload comes from the
+        // store (the edit-in-place value).
+        let payload = {
+            let vm = vm.borrow();
+            vm.quick
+                .pages
+                .get(vm.quick_page)
+                .and_then(|page| page.entries.iter().find(|candidate| candidate.label == entry.label))
+                .map(|candidate| candidate.payload.clone())
+                .unwrap_or(entry.payload)
+        };
+        let entry = QuickSendEntry { payload, ..entry };
         let bytes = if entry.hex {
             parse_hex(&entry.payload)
         } else {
@@ -1098,22 +1164,74 @@ impl MainController {
         }
     }
 
-    /// One entry row: the send button (label ▸ payload) plus the edit button
-    /// that loads the entry into the editor below the list.
+    /// One entry row (§3.5): `label │ value │ send` — **edit-in-place is the
+    /// whole interaction**: the value is a TextBox, always; Enter in a value
+    /// sends it; an edit writes through to the tab's store (in memory — the
+    /// persisted profile updates on the save/add/delete paths), so paging
+    /// re-keys the visible rows, not the values.
     fn build_quick_entry_row(this: &Rc<Self>, index: usize, entry: &QuickSendEntry) -> Ref<StackPanel> {
         let row = StackPanel::new();
         row.set_orientation(Orientation::Horizontal);
         row.set_spacing(4.0);
 
-        let send = Button::new();
-        send.set_content(Some(Rc::new(entry_button_text(entry))));
-        send.set_min_width(240.0);
-        let payload = entry.clone();
-        send.add_handler(Button::click_event(), {
-            let this = Rc::clone(this);
-            move |_, _| this.send_quick_entry(payload.clone())
-        });
+        let label = TextBlock::new();
+        let mut label_text = entry.label.clone();
+        if entry.hex {
+            label_text = format!("{} {}", t!("quick_hex_mark"), label_text);
+        }
+        label.set_text(Some(&label_text));
+        label.set_font_size(11.0);
+        label.set_opacity(0.75);
+        label.set_vertical_alignment(ferroui_base::layout::VerticalAlignment::Center);
+        let label_column = label.clone();
+        label_column.set_min_width(72.0);
+        row.children().add(label.upcast::<Control>());
 
+        let value = TextBox::new();
+        value.set_text(Some(&entry.payload));
+        value.set_font_family(logview::mono());
+        value.set_font_size(12.0);
+        {
+            let this_for_edit = Rc::clone(this);
+            let value_for_edit = value.clone();
+            value.text_changed(move |_, _| {
+                if let Some(text) = value_for_edit.text() {
+                    this_for_edit.edit_quick_entry_value(index, text);
+                }
+            });
+            let this_for_enter = Rc::clone(this);
+            let entry_for_enter = entry.clone();
+            let value_for_enter = value.clone();
+            value.key_down(move |_, args| {
+                if args.key == Key::Enter {
+                    args.set_handled(true);
+                    let payload = value_for_enter.text().unwrap_or_default();
+                    if !payload.is_empty() {
+                        let mut sent = entry_for_enter.clone();
+                        sent.payload = payload;
+                        this_for_enter.send_quick_entry(sent);
+                    }
+                }
+            });
+        }
+        row.children().add(value.upcast::<Control>());
+
+        let send = Button::new();
+        send.set_content(Some(Rc::new(t!("send").to_string())));
+        send.set_min_width(56.0);
+        let this_for_send = Rc::clone(this);
+        let entry_for_send = entry.clone();
+        send.add_handler(Button::click_event(), move |_, _| {
+            let payload = entry_for_send.payload.clone();
+            let mut sent = entry_for_send.clone();
+            sent.payload = payload;
+            // The send reads the *edited* value (the store holds it).
+            this_for_send.send_quick_entry(sent);
+        });
+        row.children().add(send.upcast::<Control>());
+
+        // The edit button still loads the entry into the editor below the list
+        // (rename / hex-flag / delete live there).
         let edit = Button::new();
         edit.set_content(Some(Rc::new(t!("quick_edit").to_string())));
         edit.set_min_width(32.0);
@@ -1121,10 +1239,26 @@ impl MainController {
             let this = Rc::clone(this);
             move |_, _| this.load_quick_entry(index)
         });
-
-        row.children().add(send.upcast::<Control>());
         row.children().add(edit.upcast::<Control>());
+
         row
+    }
+
+    /// An edit-in-place value write-through: the tab's store holds the value
+    /// (in memory; the profile persists on the save/add/delete paths — §3.5's
+    /// "each entry owns its value state").
+    fn edit_quick_entry_value(&self, index: usize, payload: String) {
+        let Some(vm) = self.active_vm() else { return };
+        let page = {
+            let vm = vm.borrow();
+            vm.quick_page
+        };
+        let mut guard = vm.borrow_mut();
+        if let Some(slot) = guard.quick.pages.get_mut(page) {
+            if let Some(entry) = slot.entries.get_mut(index) {
+                entry.payload = payload;
+            }
+        }
     }
 
     /// Loads an entry into the editor boxes for rename/delete.
@@ -1861,7 +1995,7 @@ fn wire_events(this: &Rc<MainController>) {
     });
     this.close_tab.add_handler(Button::click_event(), {
         let this = Rc::clone(this);
-        move |_, _| this.close_active_tab()
+        move |_, _| this.close_tab_clicked()
     });
 
     // Log toolbar.
