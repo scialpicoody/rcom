@@ -62,7 +62,9 @@ struct SettingsPage {
     baud_caption: Ref<TextBlock>,
     baud: Ref<ComboBox>,
     encoding_caption: Ref<TextBlock>,
+    zoom_caption: Ref<TextBlock>,
     encoding: Ref<ComboBox>,
+    zoom: Ref<ComboBox>,
     log_dir_caption: Ref<TextBlock>,
     log_dir: Ref<TextBox>,
     log_dir_note: Ref<TextBlock>,
@@ -100,6 +102,8 @@ impl SettingsPage {
         self.port_caption.set_text(Some(&t!("settings_port")));
         self.baud_caption.set_text(Some(&t!("settings_baud")));
         self.encoding_caption.set_text(Some(&t!("settings_encoding")));
+        self.zoom_caption.set_text(Some(&t!("settings_zoom")));
+        self.zoom_caption.set_text(Some(&t!("settings_zoom")));
         self.log_dir_caption.set_text(Some(&t!("settings_log_dir")));
         self.log_dir_note.set_text(Some(&t!("settings_log_dir_note")));
         self.language_caption.set_text(Some(&t!("settings_language")));
@@ -122,6 +126,7 @@ impl SettingsPage {
         self.fill_theme_selector(&saved);
         self.fill_baud_selector(&saved);
         self.fill_encoding_selector(&saved);
+        self.fill_zoom_selector(&saved);
         self.log_dir.set_text(saved.log_dir.as_deref());
         self.reduced_motion.set_is_checked(Some(saved.reduced_motion));
         self.loading.set(false);
@@ -190,6 +195,20 @@ impl SettingsPage {
         self.baud.set_selected_index(index as i32);
     }
 
+    /// The zoom step selector: the §1.8 steps, the persisted one preselected.
+    fn fill_zoom_selector(&self, saved: &Settings) {
+        let items = self.zoom.items();
+        for step in super::settings::LOG_ZOOM_STEPS {
+            let value: BoxedValue = Rc::new(format!("{step} px"));
+            items.add(Some(value));
+        }
+        let index = super::settings::LOG_ZOOM_STEPS
+            .iter()
+            .position(|step| *step == saved.log_zoom)
+            .unwrap_or(1);
+        self.zoom.set_selected_index(index as i32);
+    }
+
     fn fill_encoding_selector(&self, saved: &Settings) {
         // Deselect first: clearing a selector's items while it has a selection
         // panics in the pin's selection model (the removal path resolves the
@@ -256,6 +275,10 @@ impl SettingsPage {
                 .filter(|_| port_index >= 0)
                 .map(|info| info.name.clone()),
             default_baud: BAUD_RATES.get(baud_index.max(0) as usize).copied(),
+            log_zoom: super::settings::LOG_ZOOM_STEPS
+                .get(self.zoom.selected_index().max(0) as usize)
+                .copied()
+                .unwrap_or(13),
             default_encoding: TextEncoding::all()
                 .get(encoding_index.max(0) as usize)
                 .map(|encoding| encoding.id().to_string()),
@@ -310,6 +333,22 @@ impl SettingsPage {
         theme::apply_theme_variant(&self.window, theme_at(self.theme.selected_index()));
     }
 
+    /// The zoom step moved: set the render global, persist, re-render the
+    /// active session's rows (the other sessions render at the new size when
+    /// their tab activates).
+    fn apply_zoom(&self) {
+        if self.loading.get() {
+            return;
+        }
+        let index = self.zoom.selected_index();
+        let Some(step) = super::settings::LOG_ZOOM_STEPS.get(index.max(0) as usize).copied() else {
+            return;
+        };
+        crate::app::logview::set_log_zoom(step);
+        crate::app::controller::rerender_active_view();
+        self.persist();
+    }
+
     /// The motion toggle moved: persist (the Reduced contract is enforced by
     /// every app-added `Transitions` setter — see `settings::MOTION_DOC`).
     fn apply_motion(&self) {
@@ -346,7 +385,9 @@ pub fn attach(element: &Ref<StyledElement>, window: &Ref<MainWindow>) {
         baud_caption: NameScopeExtensions::get(element, "SettingsBaudCaption"),
         baud: NameScopeExtensions::get(element, "SettingsBaudSelector"),
         encoding_caption: NameScopeExtensions::get(element, "SettingsEncodingCaption"),
+        zoom_caption: NameScopeExtensions::get(element, "SettingsZoomCaption"),
         encoding: NameScopeExtensions::get(element, "SettingsEncodingSelector"),
+        zoom: NameScopeExtensions::get(element, "SettingsZoomSelector"),
         log_dir_caption: NameScopeExtensions::get(element, "SettingsLogDirCaption"),
         log_dir: NameScopeExtensions::get(element, "SettingsLogDirBox"),
         log_dir_note: NameScopeExtensions::get(element, "SettingsLogDirNote"),
@@ -394,6 +435,10 @@ pub fn attach(element: &Ref<StyledElement>, window: &Ref<MainWindow>) {
     page.reduced_motion.is_checked_changed({
         let page = Rc::clone(&page);
         move |_, _| page.apply_motion()
+    });
+    page.zoom.selection_changed({
+        let page = Rc::clone(&page);
+        move |_, _| page.apply_zoom()
     });
 
     PAGE.with(|cell| *cell.borrow_mut() = Some(page));

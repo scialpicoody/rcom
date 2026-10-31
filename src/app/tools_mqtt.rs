@@ -264,7 +264,7 @@ impl MqttPage {
                 }
             }
         } else {
-            mqtt.detach_bridge();
+            mqtt.detach_bridge(session);
             self.append_page_row(format!("## {}", t!("mqtt_bridge_off")));
         }
     }
@@ -309,8 +309,8 @@ impl MqttPage {
         self.rebuild_subs_list();
         // The session is gone; a dangling bridge would only error.
         if let Some(mqtt) = hub::global() {
-            if mqtt.bridged_session() == self.session.get() {
-                mqtt.detach_bridge();
+            if self.session.get().is_some_and(|id| mqtt.has_bridge(id)) {
+                mqtt.detach_bridge(self.session.get().expect("checked above"));
                 self.bridge.set_is_checked(Some(false));
             }
         }

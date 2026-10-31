@@ -25,7 +25,8 @@ struct SessionEntry {
     cancel: client::Cancel,
 }
 
-/// The MQTT⇄serial bridge attached at most once at a time.
+/// One MQTT⇄serial bridge (optional, per MQTT connection — ticket #21's
+/// "optional per connection" AC: every connection may bridge, or none).
 struct BridgeEntry {
     session_id: u64,
     topic: String,
@@ -41,7 +42,7 @@ pub struct MqttHub {
     runtime: tokio::runtime::Handle,
     next_id: AtomicU64,
     sessions: Mutex<HashMap<u64, SessionEntry>>,
-    bridge: Mutex<Option<BridgeEntry>>,
+    bridges: Mutex<HashMap<u64, BridgeEntry>>,
     /// The serial session the bridge binds to (the latest Open/Reopened port).
     session: Mutex<Option<u64>>,
 }
@@ -58,7 +59,7 @@ impl MqttHub {
             runtime: tokio::runtime::Handle::current(),
             next_id: AtomicU64::new(1),
             sessions: Mutex::new(HashMap::new()),
-            bridge: Mutex::new(None),
+            bridges: Mutex::new(HashMap::new()),
             session: Mutex::new(None),
         });
         start_housekeeping(&hub);
@@ -110,9 +111,7 @@ impl MqttHub {
         if let Some(entry) = entry {
             entry.cancel.cancel();
             self.publish_disconnected(id, &entry.config);
-            if self.bridged_session() == Some(id) {
-                self.detach_bridge();
-            }
+            self.detach_bridge(id);
         }
     }
 
@@ -129,7 +128,7 @@ impl MqttHub {
             cancel.cancel();
             self.publish_disconnected(id, &config);
         }
-        self.detach_bridge();
+        self.detach_all_bridges();
     }
 
     /// Publishes user bytes on a session's topic; `false` when the id is
@@ -197,7 +196,13 @@ impl MqttHub {
         if !self.is_running(session_id) {
             return Err(format!("session {session_id} is not running"));
         }
-        self.detach_bridge();
+        // Replacing this connection's own bridge never touches the others
+        // (the per-connection AC): take the old entry's tasks down only.
+        if let Some(old) = self.bridges.lock().expect("bridge mutex").remove(&session_id) {
+            for task in old.tasks {
+                task.abort();
+            }
+        }
         let topic = topic.trim().to_string();
         // The closure holds the hub only weakly: the hub owns the bridge, so an
         // owning capture would be a cycle keeping a dropped hub alive.
@@ -216,16 +221,16 @@ impl MqttHub {
             publish,
             &self.runtime,
         );
-        self.bridge
+        self.bridges
             .lock()
             .expect("bridge mutex")
-            .replace(BridgeEntry { session_id, topic, tasks });
+            .insert(session_id, BridgeEntry { session_id, topic, tasks });
         Ok(session_id_of_port)
     }
 
-    /// Removes the bridge, if any.
-    pub fn detach_bridge(&self) {
-        if let Some(entry) = self.bridge.lock().expect("bridge mutex").take() {
+    /// Removes one connection's bridge, if any (the others keep running).
+    pub fn detach_bridge(&self, session_id: u64) {
+        if let Some(entry) = self.bridges.lock().expect("bridge mutex").remove(&session_id) {
             tracing::debug!(
                 session = entry.session_id,
                 topic = entry.topic.as_str(),
@@ -237,14 +242,30 @@ impl MqttHub {
         }
     }
 
-    /// The session the bridge currently feeds, if any.
-    pub fn bridged_session(&self) -> Option<u64> {
-        self.bridge.lock().expect("bridge mutex").as_ref().map(|entry| entry.session_id)
+    /// Removes every bridge (app shutdown; the serial session they bind to
+    /// is going away).
+    pub fn detach_all_bridges(&self) {
+        let entries: Vec<BridgeEntry> =
+            self.bridges.lock().expect("bridge mutex").drain().map(|(_, entry)| entry).collect();
+        for entry in entries {
+            for task in entry.tasks {
+                task.abort();
+            }
+        }
     }
 
-    /// The bridge topic, if any.
-    pub fn bridge_topic(&self) -> Option<String> {
-        self.bridge.lock().expect("bridge mutex").as_ref().map(|entry| entry.topic.clone())
+    /// Whether one connection has a bridge attached.
+    pub fn has_bridge(&self, session_id: u64) -> bool {
+        self.bridges.lock().expect("bridge mutex").contains_key(&session_id)
+    }
+
+    /// One connection's bridge topic, if any.
+    pub fn bridge_topic(&self, session_id: u64) -> Option<String> {
+        self.bridges
+            .lock()
+            .expect("bridge mutex")
+            .get(&session_id)
+            .map(|entry| entry.topic.clone())
     }
 
     /// The serial session id the bridge would bind to right now.
@@ -269,7 +290,7 @@ impl Drop for MqttHub {
         for (_, entry) in self.sessions.get_mut().expect("sessions mutex").drain() {
             entry.cancel.cancel();
         }
-        self.detach_bridge();
+        self.detach_all_bridges();
     }
 }
 
@@ -320,7 +341,9 @@ fn start_housekeeping(hub: &Arc<MqttHub>) {
                                 if *session == Some(port.session_id) {
                                     *session = None;
                                     drop(session);
-                                    hub.detach_bridge();
+                                    // Every bridge binds to that one serial
+                                    // session — all of them are dead now.
+                                    hub.detach_all_bridges();
                                 }
                             }
                             PortState::Arrived | PortState::Removed => {}
@@ -540,13 +563,13 @@ mod tests {
         assert_eq!(hub.current_session(), Some(session));
 
         assert_eq!(hub.attach_bridge(id, "demo/up").ok(), Some(session));
-        assert_eq!(hub.bridged_session(), Some(id));
-        assert_eq!(hub.bridge_topic().as_deref(), Some("demo/up"));
+        assert!(hub.has_bridge(id));
+        assert_eq!(hub.bridge_topic(id).as_deref(), Some("demo/up"));
         // Re-attaching replaces (no error, no duplicate).
         assert_eq!(hub.attach_bridge(id, "demo/up2").ok(), Some(session));
-        assert_eq!(hub.bridge_topic().as_deref(), Some("demo/up2"));
-        hub.detach_bridge();
-        assert_eq!(hub.bridged_session(), None);
+        assert_eq!(hub.bridge_topic(id).as_deref(), Some("demo/up2"));
+        hub.detach_bridge(id);
+        assert!(!hub.has_bridge(id));
 
         // A Closed event of the tracked serial session clears it.
         bus.publish(Event::Port(PortEvent {

@@ -1983,6 +1983,16 @@ fn port_label(info: &PortInfo) -> String {
 /// language selector — ticket #25). Static labels, placeholders, captions and
 /// the window title re-render; history log rows keep the language they were
 /// rendered in (they are data, not chrome).
+/// Re-renders the active session's log from its model (the zoom step's live
+/// apply; the same full re-render the presentation flips share).
+pub(crate) fn rerender_active_view() {
+    PUMP.with(|pump| {
+        if let Some(controller) = pump.borrow().controller.clone() {
+            controller.render_view();
+        }
+    });
+}
+
 /// The active session's visible log lines as space-joined row texts
 /// (`RX 70 …` per data line, the note text per note line). The demo paths
 /// use this instead of walking the rendered row tree — the model is the

@@ -213,7 +213,7 @@ async fn bridge_loopback(
         ),
         LogLevel::Info,
     );
-    hub.detach_bridge();
+    hub.detach_bridge(mqtt);
     hub.stop_session(mqtt);
     manager.close().await;
     Ok(())

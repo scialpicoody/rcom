@@ -19,9 +19,25 @@ pub fn mono() -> FontFamily {
     FontFamily::parse("Cascadia Mono,Consolas,Menlo,DejaVu Sans Mono").expect("monospace font family")
 }
 
-/// `rcom.font.mono.size` — 13 on byte surfaces, 11 timestamps/badges (§1.8).
+/// `rcom.font.mono.size` — 13 default on byte surfaces, 11 timestamps/badges
+/// (§1.8); the zoom step (12/13/14/16, settings `log_zoom`) moves the byte
+/// size, the meta size stays.
 pub const MONO_LOG_SIZE: f64 = 13.0;
 pub const MONO_META_SIZE: f64 = 11.0;
+
+/// The current log zoom (px; the settings page moves it live). A process
+/// global because rows render in code from several view models.
+static LOG_ZOOM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(13);
+
+/// Applies the persisted zoom step (settings init and the live switch).
+pub fn set_log_zoom(px: u32) {
+    LOG_ZOOM.store(px, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The log zoom the rows render at.
+pub fn log_zoom() -> f64 {
+    f64::from(LOG_ZOOM.load(std::sync::atomic::Ordering::Relaxed))
+}
 
 /// Spacing scale `rcom.space.*` (§1.7).
 pub const SPACE_1: f64 = 4.0;
@@ -274,7 +290,7 @@ fn style_meta_text(text: &Ref<TextBlock>, color: Color) {
 
 fn style_log_text(text: &Ref<TextBlock>, color: Color) {
     text.set_font_family(mono());
-    text.set_font_size(MONO_LOG_SIZE);
+    text.set_font_size(log_zoom());
     text.set_value(TextBlock::foreground_property(), Some(brush(color)));
     text.set_text_wrapping(TextWrapping::Wrap);
 }

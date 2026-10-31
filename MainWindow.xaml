@@ -779,7 +779,7 @@
            live. The port selector is filled from the port listings (the same
            UiMsg::Ports the toolbar consumes). -->
       <TabItem x:Name="SettingsTab">
-        <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,*,Auto" Margin="4">
+        <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,*,Auto" Margin="4">
           <!-- Launch defaults row: port + baud + encoding, preselected on
                launch (settings load before the window builds). -->
           <StackPanel Grid.Row="0"
@@ -802,10 +802,23 @@
                       MinWidth="100" />
           </StackPanel>
 
+          <!-- Log zoom row: the §1.8 zoom step (12/13/14/16 px), applied
+               live to every session's log rows. -->
+          <StackPanel Grid.Row="1"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      Margin="0,6,0,0">
+            <TextBlock x:Name="SettingsZoomCaption"
+                       VerticalAlignment="Center"
+                       FontSize="12" />
+            <ComboBox x:Name="SettingsZoomSelector"
+                      MinWidth="70" />
+          </StackPanel>
+
           <!-- Log directory row: the override path (empty = the platform
                default). Applies at the next launch — the engine's log store
                starts before the window. -->
-          <StackPanel Grid.Row="1"
+          <StackPanel Grid.Row="2"
                       Orientation="Horizontal"
                       Spacing="6"
                       Margin="0,6,0,0">
@@ -821,7 +834,7 @@
 
           <!-- Language row: follow-OS default, en/zh picked live (the
                dictionaries re-apply without a restart). -->
-          <StackPanel Grid.Row="2"
+          <StackPanel Grid.Row="3"
                       Orientation="Horizontal"
                       Spacing="6"
                       Margin="0,6,0,0">
@@ -834,7 +847,7 @@
 
           <!-- Theme row: dark default (a serial tool's home), Light and
                FollowOS — the variant switches live. -->
-          <StackPanel Grid.Row="3"
+          <StackPanel Grid.Row="4"
                       Orientation="Horizontal"
                       Spacing="6"
                       Margin="0,6,0,0">
@@ -849,7 +862,7 @@
 
           <!-- The status line (page-pattern slot): the save outcome, and the
                settings file the page writes. -->
-          <StackPanel Grid.Row="4"
+          <StackPanel Grid.Row="5"
                       Orientation="Horizontal"
                       Spacing="6"
                       Margin="0,6,0,0">
@@ -859,10 +872,10 @@
           </StackPanel>
 
           <!-- Reserved growth space (log row cap, certificate overrides …). -->
-          <Grid Grid.Row="5" />
+          <Grid Grid.Row="6" />
 
           <TextBlock x:Name="SettingsPathNote"
-                     Grid.Row="6"
+                     Grid.Row="7"
                      FontSize="11" />
         </Grid>
       </TabItem>

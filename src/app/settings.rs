@@ -85,6 +85,17 @@ pub struct Settings {
     pub default_encoding: Option<String>,
     /// The session-log directory override; empty/absent = the default.
     pub log_dir: Option<String>,
+    /// The log's monospaced size in px — the §1.8 zoom step (12/13/14/16).
+    #[serde(default = "default_log_zoom")]
+    pub log_zoom: u32,
+}
+
+/// The §1.8 zoom steps the settings page offers (13 = the default).
+pub const LOG_ZOOM_STEPS: [u32; 4] = [12, 13, 14, 16];
+
+/// The serde default for [`Settings::log_zoom`] (13, the §1.8 default).
+fn default_log_zoom() -> u32 {
+    13
 }
 
 static SETTINGS: std::sync::OnceLock<Settings> = std::sync::OnceLock::new();
@@ -115,11 +126,18 @@ impl Settings {
         let path = Self::default_path();
         match Self::load_from(path.as_deref()) {
             Some(settings) => {
+                let mut settings = settings;
+                // A hand-edited or older file must not leave the zoom off the
+                // scale: clamp to the nearest §1.8 step.
+                if !LOG_ZOOM_STEPS.contains(&settings.log_zoom) {
+                    settings.log_zoom = 13;
+                }
                 tracing::info!(
                     path = %path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
                     theme = ?settings.theme,
                     language = ?settings.language,
                     reduced_motion = settings.reduced_motion,
+                    log_zoom = settings.log_zoom,
                     "settings loaded"
                 );
                 settings
@@ -210,6 +228,7 @@ mod tests {
             default_baud: Some(9_600),
             default_encoding: Some("gbk".into()),
             log_dir: Some("/tmp/rcom-logs".into()),
+            log_zoom: 14,
         };
         let path = temp_path("roundtrip");
         settings.save_to(Some(&path)).expect("save");
