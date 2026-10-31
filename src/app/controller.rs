@@ -188,6 +188,8 @@ impl MainController {
         MainController::setup_script_page(&this);
         // ISSUE #20 (one insertion point): the net tools page of the bottom pane.
         super::tools_net::attach(element);
+        // ISSUE #24 (one insertion point): the plot page of the bottom pane.
+        super::tools_plot::attach(element);
         wire_events(&this);
         start_pump(&this);
         MainController::autodemo_persist_check(&this);
@@ -848,6 +850,8 @@ impl MainController {
             UiMsg::SetEncoding(encoding) => self.apply_set_encoding(encoding),
             // ISSUE #20 (one insertion point): the net tools page consumes its events.
             UiMsg::Net(net) => super::tools_net::apply_net(net),
+            // ISSUE #24 (one insertion point): the plot page consumes its events.
+            UiMsg::Plot(plot) => super::tools_plot::apply_plot(plot),
         }
     }
 
@@ -1049,11 +1053,23 @@ fn start_pump(controller: &Rc<MainController>) {
 }
 
 fn pump_tick() {
+    let started = std::time::Instant::now();
     let messages: Vec<UiMsg> = core_host().ui_rx.lock().expect("ui pump mutex").try_iter().collect();
     if let Some(controller) = PUMP.with(|pump| pump.borrow().controller.clone()) {
         for message in messages {
             controller.apply(message);
         }
+    }
+    // ISSUE #24 (one insertion point): the plot page's re-render nudge —
+    // invalidates the plot view only when the plot store changed (≤ 30 fps).
+    super::tools_plot::pump_tick();
+    // The live-rate budget (issue #24): the tick runs every 30 ms; a plot at
+    // full wire rate must never push it over. Breaches trace so the PLOTDEMO
+    // smoke proves the pump stayed under budget by their absence.
+    let elapsed = started.elapsed();
+    if elapsed > Duration::from_millis(20) {
+        tracing::warn!(target: "rcom::pump", "pump tick {:.1} ms — over the 20 ms budget",
+            elapsed.as_secs_f64() * 1000.0);
     }
 }
 
