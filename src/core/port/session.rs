@@ -25,9 +25,24 @@ pub struct Session {
     writer: PortWriter,
     cancel: Arc<AtomicBool>,
     forwarder: JoinHandle<()>,
+    /// Liveness (ticket #35): `false` once the forwarder task ended — the
+    /// reader hit a terminal event (error/clean close) or its stream ended.
+    /// A dead session lingers in the manager's map until `open()` replaces it
+    /// or the user closes it; `open()` refuses a port whose session is alive.
+    alive: Arc<AtomicBool>,
     /// The playback control of a mock port (`None` for real ports) — the
     /// manager surfaces it as `mock_controls(session_id)` (design-ui §5.7).
     mock_control: Option<MockControl>,
+}
+
+/// Clears the session's liveness flag when the forwarder task ends — every
+/// exit path of the task drops it.
+struct AliveGuard(Arc<AtomicBool>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 impl Session {
@@ -41,43 +56,48 @@ impl Session {
             control,
         } = opened;
         let session_port = port.clone();
-        let forwarder = tokio::spawn(async move {
-            let report = |state, detail: Option<String>| {
-                bus.publish(Event::Port(PortEvent {
-                    session_id: id,
-                    port: session_port.clone(),
-                    state,
-                    detail,
-                    timestamp: chrono::Local::now(),
-                    // Terminal events of a dying session carry no open config;
-                    // the Open/Reopened events (with baud) come from the manager
-                    // and the reconnect machine.
-                    baud: None,
-                }))
-            };
-            while let Some(event) = events.recv().await {
-                match event {
-                    ReadEvent::Data(bytes) => publish_rx(&bus, id, bytes),
-                    ReadEvent::Note(text) => bus.publish(Event::Log(LogEvent {
-                        level: LogLevel::Info,
+        let alive = Arc::new(AtomicBool::new(true));
+        let forwarder = {
+            let alive = Arc::clone(&alive);
+            tokio::spawn(async move {
+                let _alive_guard = AliveGuard(Arc::clone(&alive));
+                let report = |state, detail: Option<String>| {
+                    bus.publish(Event::Port(PortEvent {
+                        session_id: id,
+                        port: session_port.clone(),
+                        state,
+                        detail,
                         timestamp: chrono::Local::now(),
-                        message: text,
-                        session_id: Some(id),
-                    })),
-                    ReadEvent::Error(detail) => {
-                        report(PortState::Error, Some(detail));
-                        return;
-                    }
-                    ReadEvent::Closed => {
-                        report(PortState::Closed, None);
-                        return;
+                        // Terminal events of a dying session carry no open config;
+                        // the Open/Reopened events (with baud) come from the manager
+                        // and the reconnect machine.
+                        baud: None,
+                    }))
+                };
+                while let Some(event) = events.recv().await {
+                    match event {
+                        ReadEvent::Data(bytes) => publish_rx(&bus, id, bytes),
+                        ReadEvent::Note(text) => bus.publish(Event::Log(LogEvent {
+                            level: LogLevel::Info,
+                            timestamp: chrono::Local::now(),
+                            message: text,
+                            session_id: Some(id),
+                        })),
+                        ReadEvent::Error(detail) => {
+                            report(PortState::Error, Some(detail));
+                            return;
+                        }
+                        ReadEvent::Closed => {
+                            report(PortState::Closed, None);
+                            return;
+                        }
                     }
                 }
-            }
-            // The stream ended without a terminal event (all senders dropped): report
-            // a plain close so consumers never wait for a state that never comes.
-            report(PortState::Closed, None);
-        });
+                // The stream ended without a terminal event (all senders dropped): report
+                // a plain close so consumers never wait for a state that never comes.
+                report(PortState::Closed, None);
+            })
+        };
 
         Self {
             id,
@@ -86,8 +106,17 @@ impl Session {
             writer,
             cancel,
             forwarder,
+            alive,
             mock_control: control,
         }
+    }
+
+    /// Whether the session is still live: its forwarder has not ended (no
+    /// terminal reader event yet). A dead session stays in the manager's map
+    /// until [`super::manager::PortManager::open`] replaces it or the user
+    /// closes it (the reconnect machine's contract).
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
     }
 
     /// The playback control of this session's port, when it is a mock port.

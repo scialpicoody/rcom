@@ -205,6 +205,10 @@ impl LuaRuntime {
         // The `rcom.ui` plot table (issue #24): the `add_point` tap the decoders
         // (and any script) use; merges into the same `rcom` global.
         crate::core::plot::lua_api::install(&lua)?;
+        // The `rcom.ports` cross-session table (ticket #35): enumerate sessions,
+        // cross-send through their TX paths; resolves the process-global port
+        // manager lazily (a VM without one still loads).
+        super::ports_api::install(&lua)?;
 
         // Script VMs announce themselves, then head.lua sets up print/log/sys/…
         lua.globals().set("runType", "script")?;
@@ -372,6 +376,8 @@ fn install_host_api(lua: &Lua, inner: Arc<Inner>) -> mlua::Result<()> {
     // apiGetPath / apiUtf8ToHex / apiAscii2Utf8 — llcom API surface shims.
     // rcom keeps scripts in-memory (require is preload-only), so the profile
     // path is empty; hex encoding covers UTF-8 bytes (GBK lands with encoding_rs).
+    // apiAscii2Utf8 takes a Lua string (llcom passes `tostring(err)` into it —
+    // a `Vec<u8>` binding would reject that and mask the real error, #35).
     globals.set("apiGetPath", lua.create_function(|_, ()| Ok(String::new()))?)?;
     globals.set(
         "apiUtf8ToHex",
@@ -379,7 +385,9 @@ fn install_host_api(lua: &Lua, inner: Arc<Inner>) -> mlua::Result<()> {
     )?;
     globals.set(
         "apiAscii2Utf8",
-        lua.create_function(|_, bytes: Vec<u8>| Ok(String::from_utf8_lossy(&bytes).into_owned()))?,
+        lua.create_function(|_, text: mlua::String| {
+            Ok(String::from_utf8_lossy(text.as_bytes().as_ref()).into_owned())
+        })?,
     )?;
 
     // apiQuickSendList(id) — "" until ticket #19 wires the quick-send store;

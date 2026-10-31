@@ -15,6 +15,8 @@ pub mod mock;
 pub mod reconnect;
 pub mod serial;
 pub mod session;
+#[cfg(test)]
+pub(crate) mod testing;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
