@@ -163,6 +163,7 @@ impl CodecPage {
         self.status.set_text(Some(&t!("codec_status_idle")));
         self.input.set_placeholder_text(Some(&t!("codec_input_hint")));
 
+        self.op.set_selected_index(-1);
         let ops = self.op.items();
         ops.clear();
         for codec_op in CodecOp::all() {
@@ -172,6 +173,7 @@ impl CodecPage {
         self.op.set_selected_index(0);
 
         for selector in [&self.from, &self.to] {
+            selector.set_selected_index(-1);
             let items = selector.items();
             items.clear();
             for encoding in TextEncoding::all() {
@@ -450,8 +452,25 @@ pub fn attach(element: &Ref<StyledElement>) {
         let page = Rc::clone(&page);
         move |_, _| page.apply_candidate()
     });
+
+    PAGE.with(|cell| *cell.borrow_mut() = Some(page));
 }
 
+ferroui_base::ferro_thread_local! {
+    /// The UI-thread handle to the page (the language re-apply runs there; the
+    /// pattern of the other pages' PAGE / the controller's PUMP).
+    static PAGE: RefCell<Option<Rc<CodecPage>>> = RefCell::new(None);
+}
+
+/// Re-applies the locale strings after a language switch (the settings page's
+/// live apply — ticket #25).
+pub fn apply_strings() {
+    PAGE.with(|cell| {
+        if let Some(page) = cell.borrow().as_ref() {
+            page.apply_ui_strings();
+        }
+    });
+}
 #[cfg(test)]
 mod tests {
     use super::*;

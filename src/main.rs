@@ -15,8 +15,12 @@ use ferroui_controls::AppBuilder;
 use ferroui_desktop::AppBuilderDesktopExtensions;
 
 fn main() -> std::process::ExitCode {
-    // The i18n locale (RCOM_LANG, else the system locale, else English) before the
-    // first `t!` runs.
+    // The persisted settings load FIRST (ticket #25): the theme variant, the
+    // language and the log directory must be known before anything reads them —
+    // the locale below, the window's look, the engine's log store.
+    rcom::init_settings();
+    // The i18n locale (RCOM_LANG, then the persisted setting, else the system
+    // locale, else English) before the first `t!` runs.
     rcom::init_locale();
     tracing_subscriber::fmt()
         .with_env_filter(

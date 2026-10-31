@@ -24,6 +24,7 @@ ferroui_markup_xaml::include_compiled_xaml!();
 
 pub use app::App;
 pub use app::i18n::init_locale;
+pub use app::settings::init as init_settings;
 pub use main_window::MainWindow;
 pub use register_types::{register_types, ASSEMBLY};
 

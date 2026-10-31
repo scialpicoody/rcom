@@ -40,8 +40,9 @@ use rcom::core::port::PortInfo;
 
 use rust_i18n::t;
 
-/// The baud rates the baud selector offers; 115200 is preselected.
-const BAUD_RATES: [u32; 7] = [9_600, 19_200, 38_400, 57_600, 115_200, 230_400, 460_800];
+/// The baud rates the baud selector offers; 115200 is preselected (or the
+/// persisted launch default — ticket #25).
+pub(crate) const BAUD_RATES: [u32; 7] = [9_600, 19_200, 38_400, 57_600, 115_200, 230_400, 460_800];
 
 /// How many rows the log view keeps before it drops the oldest: the virtualized
 /// list keeps memory sane, llcom-style. Applies to the row model too (the model
@@ -68,6 +69,9 @@ enum LogLine {
 }
 
 pub struct MainController {
+    /// The window itself: the title re-applies with the language (ticket #25's
+    /// live switch) and the settings page holds its own handle for the theme.
+    window: Ref<crate::MainWindow>,
     port_selector: Ref<ComboBox>,
     baud_selector: Ref<ComboBox>,
     open_close: Ref<Button>,
@@ -122,6 +126,9 @@ pub struct MainController {
     /// The saved script names behind the picker (samples come first, from
     /// [`scriptstore::SAMPLES`]).
     scripts: RefCell<Vec<String>>,
+    /// Whether the persisted launch-default port already preselected (the
+    /// first listing after launch only — afterwards the user's choice wins).
+    port_preset_done: Cell<bool>,
 }
 
 impl MainController {
@@ -130,9 +137,11 @@ impl MainController {
     /// UI thread, after the window's markup is populated.
     pub fn attach(window: &Ref<crate::MainWindow>) {
         let element: &Ref<StyledElement> = window.upcast_ref();
-        window.set_title(Some(t!("title").to_string()));
+        // (The title applies with every string re-application; see
+        // `apply_ui_strings` — the language switch retitles the window.)
 
         let this = Rc::new(Self {
+            window: window.clone(),
             port_selector: NameScopeExtensions::get(element, "PortSelector"),
             baud_selector: NameScopeExtensions::get(element, "BaudSelector"),
             open_close: NameScopeExtensions::get(element, "OpenCloseButton"),
@@ -179,6 +188,7 @@ impl MainController {
             quick_page: Cell::new(0),
             quick_editing: Cell::new(None),
             scripts: RefCell::new(Vec::new()),
+            port_preset_done: Cell::new(false),
         });
 
         this.apply_ui_strings();
@@ -197,17 +207,23 @@ impl MainController {
         super::tools_codec::attach(element);
         // ISSUE #23 (one insertion point): the serial monitor page of the bottom pane.
         super::tools_monitor::attach(element);
+        // ISSUE #25 (one insertion point): the settings page of the bottom pane —
+        // the window handle is the live theme switch's target.
+        super::tools_settings::attach(element, window);
         wire_events(&this);
         start_pump(&this);
         MainController::autodemo_persist_check(&this);
+        MainController::autodemo_settings_check();
 
         // Kick off the first port listing.
         core_host().commands.send(Command::RefreshPorts).ok();
     }
 
     /// Every visible string of the window, from the dictionaries (the XAML carries
-    /// none, so both locales ship from the same document).
+    /// none, so both locales ship from the same document). Re-runs on a live
+    /// language switch (ticket #25).
     fn apply_ui_strings(&self) {
+        self.window.set_title(Some(t!("title").to_string()));
         self.refresh_button.set_content(Some(Rc::new(t!("refresh").to_string())));
         self.send_button.set_content(Some(Rc::new(t!("send").to_string())));
         self.send_box.set_placeholder_text(Some(&t!("send_hint")));
@@ -253,19 +269,35 @@ impl MainController {
             let value: BoxedValue = Rc::new(rate.to_string());
             items.add(Some(value));
         }
-        let default = BAUD_RATES.iter().position(|rate| *rate == 115_200).unwrap_or(0);
+        // The persisted launch default preselects (ticket #25); 115200 stays
+        // the fallback when nothing is persisted.
+        let wanted = super::settings::global()
+            .map(|settings| settings.resolved_baud())
+            .unwrap_or(115_200);
+        let default = BAUD_RATES
+            .iter()
+            .position(|rate| *rate == wanted)
+            .unwrap_or_else(|| BAUD_RATES.iter().position(|rate| *rate == 115_200).unwrap_or(0));
         self.baud_selector.set_selected_index(default as i32);
     }
 
-    /// The encoding selector: one entry per [`TextEncoding`], UTF-8 preselected.
-    /// The names are proper nouns (see [`TextEncoding::display_name`]).
+    /// The encoding selector: one entry per [`TextEncoding`], the persisted
+    /// launch default preselected (UTF-8 fallback). The names are proper nouns
+    /// (see [`TextEncoding::display_name`]).
     fn fill_encoding_selector(&self) {
         let items = self.encoding_selector.items();
         for encoding in TextEncoding::all() {
             let value: BoxedValue = Rc::new(encoding.display_name().to_string());
             items.add(Some(value));
         }
-        self.encoding_selector.set_selected_index(0);
+        let wanted = super::settings::global()
+            .map(|settings| settings.resolved_encoding())
+            .unwrap_or(TextEncoding::Utf8);
+        let index = TextEncoding::all()
+            .iter()
+            .position(|encoding| *encoding == wanted)
+            .unwrap_or(0);
+        self.encoding_selector.set_selected_index(index as i32);
     }
 
     /// The selected baud rate, defaulting to 115200 while nothing is selected.
@@ -537,6 +569,42 @@ impl MainController {
         }
     }
 
+    /// The `RCOM_SETTINGSDEMO=1` proof (ticket #25), the same two-run pattern
+    /// as `=persist`: run 1 flips the theme and the language **through the
+    /// settings page's real selector paths** (live variant switch, live string
+    /// re-apply) and persists; run 2 finds the flipped values in the loaded
+    /// settings — which also means the startup look and locale came from the
+    /// file — and says OK.
+    fn autodemo_settings_check() {
+        if std::env::var("RCOM_SETTINGSDEMO").as_deref() != Ok("1") {
+            return;
+        }
+        use super::settings::{LanguageMode, ThemeMode};
+        let loaded = super::settings::Settings::load();
+        if loaded.theme == ThemeMode::Light && loaded.language == LanguageMode::Chinese {
+            tracing::info!(
+                "AUTODEMO SETTINGS OK: theme=light and language=zh survived the restart \
+                 (persisted at {}; the startup look and locale came from this file; the \
+                 settings tab header resolves as '{}' in that locale) — the two-run \
+                 persist proof is complete",
+                super::settings::Settings::default_path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<no config dir>".into()),
+                t!("settings_tab"),
+            );
+            return;
+        }
+        // Run 1: the flip goes through the page's real change handlers (the
+        // selection-changed events fire: live theme switch, live language
+        // re-apply, TOML save).
+        super::tools_settings::autodemo_flip();
+        tracing::info!(
+            "AUTODEMO SETTINGS: flipped theme→light (live variant switch) and \
+             language→zh (live string re-apply) through the settings page and \
+             persisted (run 1) — run again to see AUTODEMO SETTINGS OK"
+        );
+    }
+
     fn update_quick_page_label(&self) {
         let label = t!("page_indicator", page = self.quick_page.get() + 1, total = PAGE_COUNT);
         self.quick_page_label.set_text(Some(&label));
@@ -686,14 +754,18 @@ impl MainController {
         this.refresh_script_picker();
     }
 
-    /// Rebuilds the picker: the built-in samples first, then the saved scripts
-    /// (`<config>/rcom/scripts/*.lua`), nothing selected.
+    /// Rebuilds the picker: the built-in samples first (translated display
+    /// names — the sweep keeps even these out of the raw string set), then the
+    /// saved scripts (`<config>/rcom/scripts/*.lua`), nothing selected.
     fn refresh_script_picker(&self) {
+        // Deselect before the rebuild (see `show_ports` — a selection cannot
+        // survive an items clear at this pin).
+        self.script_selector.set_selected_index(-1);
         let items = self.script_selector.items();
         items.clear();
         *self.scripts.borrow_mut() = scriptstore::list(scriptstore::scripts_dir().as_deref());
-        for sample in scriptstore::SAMPLES {
-            let value: BoxedValue = Rc::new(sample.name.to_string());
+        for index in 0..scriptstore::SAMPLES.len() {
+            let value: BoxedValue = Rc::new(scriptstore::sample_display_name(index));
             items.add(Some(value));
         }
         for name in self.scripts.borrow().iter() {
@@ -713,8 +785,11 @@ impl MainController {
         let index = index as usize;
         let samples = scriptstore::SAMPLES.len();
         let loaded = if index < samples {
-            let sample = &scriptstore::SAMPLES[index];
-            Some((sample.name.to_string(), sample.code.to_string()))
+            // The sample loads under its translated display name (what the
+            // pickers showed; saving it under that name is a regular save).
+            let name = scriptstore::sample_display_name(index);
+            let code = scriptstore::SAMPLES[index].code.to_string();
+            Some((name, code))
         } else {
             let name = self.scripts.borrow().get(index - samples).cloned();
             name.and_then(|name| {
@@ -869,6 +944,9 @@ impl MainController {
     fn show_ports(&self, ports: Vec<PortInfo>) {
         let remember = self.port_selector.selected_index();
         let count = ports.len() as i32;
+        // Deselect first: clearing a selector's items while it has a selection
+        // panics in the pin's selection model (same guard as the settings page).
+        self.port_selector.set_selected_index(-1);
         let items = self.port_selector.items();
         items.clear();
         for info in &ports {
@@ -879,24 +957,62 @@ impl MainController {
             let value: BoxedValue = Rc::new(name);
             items.add(Some(value));
         }
+        // ISSUE #25: the settings page's default-port picker shows the same
+        // listing.
+        super::tools_settings::apply_ports(&ports);
         *self.ports.borrow_mut() = ports;
-        // Keep the previous selection when it still exists, else the first port.
-        let kept = if remember >= 0 && remember < count {
-            remember
-        } else if count > 0 {
-            0
+        // Ticket #25: the persisted launch-default port preselects once (the
+        // first listing after launch); afterwards the user's choice wins.
+        let preset = if self.port_preset_done.get() {
+            None
         } else {
-            -1
+            self.port_preset_done.set(true);
+            super::settings::global().and_then(|settings| settings.default_port.clone())
         };
+        // Keep the previous selection when it still exists, else the first port
+        // — unless the launch default names one of the listed ports.
+        let kept = preset
+            .and_then(|name| {
+                self.ports
+                    .borrow()
+                    .iter()
+                    .position(|info| info.name == name)
+                    .map(|index| index as i32)
+            })
+            .unwrap_or(if remember >= 0 && remember < count {
+                remember
+            } else if count > 0 {
+                0
+            } else {
+                -1
+            });
         self.port_selector.set_selected_index(kept);
     }
+}
+
+/// Re-applies every visible string after a locale switch (the settings page's
+/// language selector — ticket #25). Static labels, placeholders, captions and
+/// the window title re-render; history log rows keep the language they were
+/// rendered in (they are data, not chrome).
+pub(crate) fn apply_all_strings() {
+    PUMP.with(|pump| {
+        if let Some(controller) = pump.borrow().controller.clone() {
+            controller.apply_ui_strings();
+        }
+    });
+    super::tools_net::apply_strings();
+    super::tools_mqtt::apply_strings();
+    super::tools_plot::apply_strings();
+    super::tools_codec::apply_strings();
+    super::tools_monitor::apply_strings();
+    super::tools_settings::apply_strings();
 }
 
 /// The payload preview on an entry's send button: escapes line breaks, marks hex
 /// payloads, truncates.
 fn entry_button_text(entry: &QuickSendEntry) -> String {
     let payload = if entry.hex {
-        format!("[hex] {}", entry.payload)
+        format!("{} {}", t!("quick_hex_mark"), entry.payload)
     } else {
         entry.payload.replace('\r', "\\r").replace('\n', "\\n")
     };

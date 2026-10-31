@@ -48,6 +48,12 @@ impl MainWindow {
     pub fn new() -> Ref<Self> {
         let this = instantiate(Self::construct());
         Self::initialize_component(&this);
+        // The persisted look, before the controller attaches and before the
+        // main loop runs (ticket #25 — the prototype's proven pattern): the
+        // requested theme variant (dark by default) and the teal accent ramp,
+        // both declared on the window — a theme-variant root, so the variant
+        // becomes the actual one for the whole tree.
+        crate::app::theme::apply_startup_look(&this);
         // The markup is populated: the controller can resolve the named controls.
         crate::app::controller::MainController::attach(&this);
         Self::start_smoke_exit(&this);

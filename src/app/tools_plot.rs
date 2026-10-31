@@ -84,6 +84,9 @@ impl PlotPage {
     /// (`<config>/rcom/scripts/*.lua`); the bundled framed-protocol decoder
     /// preselects.
     fn refresh_decoder_picker(&self) {
+        // Deselect first: clearing a selector's items while it has a selection
+        // panics in the pin's selection model (same guard as the settings page).
+        self.decoder.set_selected_index(-1);
         let items = self.decoder.items();
         items.clear();
         *self.scripts.borrow_mut() = scriptstore::list(scriptstore::scripts_dir().as_deref());
@@ -92,7 +95,9 @@ impl PlotPage {
             if sample.code == FRAMED_DECODER_SAMPLE {
                 framed_index.get_or_insert(index);
             }
-            let value: BoxedValue = Rc::new(sample.name.to_string());
+            // The translated display name (ticket #25's sweep — the pickers
+            // never show the raw internal `sample: …` identifiers).
+            let value: BoxedValue = Rc::new(scriptstore::sample_display_name(index));
             items.add(Some(value));
         }
         for name in self.scripts.borrow().iter() {
@@ -113,8 +118,11 @@ impl PlotPage {
         let index = index as usize;
         let samples = scriptstore::SAMPLES.len();
         if index < samples {
-            let sample = &scriptstore::SAMPLES[index];
-            Some((sample.name.to_string(), sample.code.to_string()))
+            // The sample loads under its translated display name (what the
+            // picker showed).
+            let name = scriptstore::sample_display_name(index);
+            let code = scriptstore::SAMPLES[index].code.to_string();
+            Some((name, code))
         } else {
             let name = self.scripts.borrow().get(index - samples).cloned()?;
             let code = scriptstore::load(scriptstore::scripts_dir().as_deref(), &name)?;
@@ -281,6 +289,16 @@ pub fn apply_plot(plot: PlotEvent) {
     });
 }
 
+
+/// Re-applies the locale strings after a language switch (the settings page's
+/// live apply — ticket #25).
+pub fn apply_strings() {
+    PAGE.with(|cell| {
+        if let Some(page) = cell.borrow().as_ref() {
+            page.apply_ui_strings();
+        }
+    });
+}
 /// The pump's per-tick plot nudge (a store-version check; invalidates the
 /// view when data changed).
 pub fn pump_tick() {

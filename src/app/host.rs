@@ -146,7 +146,13 @@ fn start_engine() -> CoreHost {
             // engine's always-on services (log store, hotplug poller, reconnect
             // machine) start beside the driver loop, on the same runtime.
             runtime.block_on(async move {
-                let logstore = LogStore::start(default_log_dir(), &driver_bus);
+                // The log directory: the settings override when persisted
+                // (ticket #25 — the settings load runs before the engine
+                // starts), else the platform default.
+                let log_dir = super::settings::global()
+                    .map(|settings| settings.resolved_log_dir())
+                    .unwrap_or_else(default_log_dir);
+                let logstore = LogStore::start(log_dir, &driver_bus);
                 hotplug::spawn(Arc::clone(&backend), driver_bus.clone());
                 reconnect::spawn(Arc::clone(&manager), driver_bus.clone());
                 // ISSUE #20: the process-global net hub (channels + bridge) and,
@@ -808,7 +814,7 @@ fn start_demo_vm(
         Ok(vm) => Some(vm),
         Err(error) => {
             let _ = ui.send(UiMsg::Row {
-                text: format!("!! lua demo failed: {error}"),
+                text: format!("!! {}", rust_i18n::t!("lua_demo_failed", error = &error)),
                 direction: None,
             });
             None
@@ -1053,31 +1059,40 @@ pub fn format_port_row(port: &PortEvent) -> String {
         PortState::Closed => format!("{stamp}  ==  {}", rust_i18n::t!("closed", name = &port.port)),
         PortState::Error => format!(
             "{stamp}  !!  {}",
-            rust_i18n::t!(
-                "port_error",
-                name = &port.port,
-                detail = port.detail.as_deref().unwrap_or("unknown")
-            )
+            rust_i18n::t!("port_error", name = &port.port, detail = localize_port_detail(port.detail.as_deref()))
         ),
         PortState::WatchDesired => format!(
             "{stamp}  ==  {}",
-            rust_i18n::t!(
-                "port_watching",
-                name = &port.port,
-                detail = port.detail.as_deref().unwrap_or("waiting for the port to reappear")
-            )
+            rust_i18n::t!("port_watching", name = &port.port, detail = localize_port_detail(port.detail.as_deref()))
         ),
         PortState::Reopened => format!(
             "{stamp}  ==  {}",
             rust_i18n::t!(
                 "port_reopened",
                 name = &port.port,
-                detail = port.detail.as_deref().unwrap_or("reconnected"),
+                detail = localize_port_detail(port.detail.as_deref()),
                 baud = port.baud.unwrap_or(0)
             )
         ),
         PortState::Arrived => format!("{stamp}  --  {}", rust_i18n::t!("port_arrived", name = &port.port)),
         PortState::Removed => format!("{stamp}  --  {}", rust_i18n::t!("port_removed", name = &port.port)),
+    }
+}
+
+/// The sweep (ticket #25): the core publishes English detail strings as data
+/// (the reconnect machine's two known phrases); the render boundary translates
+/// the known ones and passes everything else through (OS errors etc. read as
+/// they arrived). `None` degrades to the localized "unknown".
+fn localize_port_detail(detail: Option<&str>) -> String {
+    match detail {
+        None => rust_i18n::t!("detail_unknown").to_string(),
+        Some(known) if known == reconnect::DETAIL_WATCHING => {
+            rust_i18n::t!("port_detail_watching").to_string()
+        }
+        Some(known) if known == reconnect::DETAIL_RECONNECTED => {
+            rust_i18n::t!("port_detail_reconnected").to_string()
+        }
+        Some(other) => other.to_string(),
     }
 }
 
@@ -1101,7 +1116,11 @@ pub fn format_script_row(out: &ScriptOutEvent) -> String {
     let stamp = out.timestamp.format("%H:%M:%S%.3f");
     match &out.kind {
         ScriptOutKind::Print { line } => format!("{stamp}  ~~  {line}"),
-        ScriptOutKind::Error { message } => format!("{stamp}  ~~  !! script error: {message}"),
+        // The sweep (ticket #25): the error prefix translates; the `~~`/`!!`
+        // row-kind markers are log syntax, not prose.
+        ScriptOutKind::Error { message } => {
+            format!("{stamp}  ~~  !! {}", rust_i18n::t!("script_error", message = message))
+        }
     }
 }
 
@@ -1111,14 +1130,15 @@ pub fn format_plot_row(plot: &PlotEvent) -> String {
     let stamp = plot.timestamp.format("%H:%M:%S%.3f");
     match &plot.kind {
         PlotEventKind::DecoderStarted { name } => {
-            format!("{stamp}  ==  [plot] decoder started: {name}")
+            format!("{stamp}  ==  [plot] {}", rust_i18n::t!("plot_row_started", name = name))
         }
         PlotEventKind::DecoderStopped { name } => {
-            format!("{stamp}  ==  [plot] decoder stopped: {name}")
+            format!("{stamp}  ==  [plot] {}", rust_i18n::t!("plot_row_stopped", name = name))
         }
-        PlotEventKind::DecoderFailed { name, message } => {
-            format!("{stamp}  ~~  !! [plot] decoder failed: {name}: {message}")
-        }
+        PlotEventKind::DecoderFailed { name, message } => format!(
+            "{stamp}  ~~  !! [plot] {}",
+            rust_i18n::t!("plot_row_failed", name = name, reason = message)
+        ),
     }
 }
 
@@ -1338,6 +1358,24 @@ mod tests {
             kind: PlotEventKind::DecoderFailed { name: "d".into(), message: "boom".into() },
         });
         assert!(failed.contains("~~") && failed.contains("!! [plot] decoder failed: d: boom"), "{failed}");
+    }
+
+    /// The render-boundary detail localization (ticket #25's sweep): the
+    /// reconnect machine's two known phrases translate, unknown details and OS
+    /// errors pass through, `None` degrades to the localized "unknown".
+    #[test]
+    fn port_details_localize_at_the_render_boundary() {
+        use rcom::core::port::reconnect;
+        // The known core phrases: the English dictionary keeps their wording,
+        // so the en rows read as before.
+        assert_eq!(
+            localize_port_detail(Some(reconnect::DETAIL_WATCHING)),
+            "waiting for the port to reappear (auto-reconnect)"
+        );
+        assert_eq!(localize_port_detail(Some(reconnect::DETAIL_RECONNECTED)), "auto-reconnected");
+        // Everything else passes through verbatim (OS errors, driver texts).
+        assert_eq!(localize_port_detail(Some("Device not found")), "Device not found");
+        assert_eq!(localize_port_detail(None), "unknown");
     }
 }
 
