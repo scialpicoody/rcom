@@ -309,6 +309,7 @@ fn start_housekeeping(hub: &Arc<MqttHub>) {
                                     .remove(&mqtt.session_id);
                             }
                         }
+                        Event::Plot(_) => {}
                         Event::Port(port) => match port.state {
                             PortState::Open | PortState::Reopened => {
                                 *hub.session.lock().expect("session mutex") = Some(port.session_id);

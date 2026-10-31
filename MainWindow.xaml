@@ -386,8 +386,6 @@
           </StackPanel>
         </Grid>
       </TabItem>
-        </Grid>
-      </TabItem>
     </TabControl>
   </Grid>
 </Window>

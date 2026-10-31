@@ -264,8 +264,6 @@ impl LogStore {
                     plot.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
                 ));
             }
-                ));
-            }
         }
     }
 

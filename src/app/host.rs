@@ -1278,13 +1278,17 @@ mod tests {
     }
 
     /// The plot lifecycle rows (issue #24): a `[plot]` tag, `==` for the
-    /// lifecycle notes, `~~ !!` flagging a failure; `render_event` passes them
-    /// through (they land in the main log view too).
+    /// lifecycle notes, `~~ !!` flagging a failure. The driver arm renders the
+    /// row (like the MQTT tool's), so `render_event` skips them to avoid double
+    /// logging; `format_plot_row` is the row source.
     #[test]
     fn plot_rows_render_lifecycle() {
         let event = |kind| Event::Plot(PlotEvent { timestamp: stamp(), kind });
-        let started = render_event(&event(PlotEventKind::DecoderStarted { name: "d".into() }))
-            .expect("plot events render");
+        assert!(render_event(&event(PlotEventKind::DecoderStarted { name: "d".into() })).is_none());
+        let started = format_plot_row(&PlotEvent {
+            timestamp: stamp(),
+            kind: PlotEventKind::DecoderStarted { name: "d".into() },
+        });
         assert!(started.contains("==  [plot] decoder started: d"), "{started}");
         let stopped = format_plot_row(&PlotEvent {
             timestamp: stamp(),
