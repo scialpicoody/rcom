@@ -478,16 +478,23 @@ async fn driver(
                 // session stays usable). Each cycle: trigger → the scripted
                 // reappear window → the machine re-opens → a ping.
                 for cycle in 0..6u32 {
+                    let _ = cycle;
                     let _ = demo.send(Command::MockAction {
                         session_id,
                         action: MockAction::Trigger(MockTrigger::Unplug),
                     });
-                    let _ = cycle;
                     // Reappear (5 s / 8) + the machine's poll cadence + margin.
                     tokio::time::sleep(Duration::from_millis(2200)).await;
-                    let _ = demo.send(Command::SendBytes {
-                        session_id: Some(session_id),
-                        bytes: b"ping".to_vec(),
+                    // The auto-reopen bound a fresh session id — pick it up,
+                    // then inject the "data flows again" ping through THAT
+                    // session's playback control (the unplug scenario
+                    // generates its own data and drops writes; the injected
+                    // ping rides the replugged session to the bus, where the
+                    // evidence arm watches for it).
+                    let Some(current) = id_rx.recv().await else { return };
+                    let _ = demo.send(Command::MockAction {
+                        session_id: current,
+                        action: MockAction::InjectRx(b"ping".to_vec()),
                     });
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }
@@ -1125,9 +1132,12 @@ async fn driver(
                             }
                             _ => {}
                         }
-                        // The demo trigger tasks need their sessions' ids.
+                        // The demo trigger tasks need their sessions' ids. The
+                        // auto-reopen binds a fresh id (the replacement), so
+                        // Reopened forwards too — the reconnect demo injects
+                        // its post-replug ping on the session that is alive.
                         if let Some(demo_id_tx) = &demo_id_tx {
-                            if port.state == PortState::Open {
+                            if matches!(port.state, PortState::Open | PortState::Reopened) {
                                 let _ = demo_id_tx.send(port.session_id);
                             }
                         }

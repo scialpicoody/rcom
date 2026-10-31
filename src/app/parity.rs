@@ -426,9 +426,19 @@ pub async fn run(manager: Arc<PortManager>, bus: rcom::core::EventBus, logstore:
     .await;
     record(&bus, &mut ok, &mut gaps, "garbled-recovery", unwrap_timeout(garbled));
 
-    // Row: MQTT test — hub session against the in-process mock broker.
+    // Row: MQTT test — hub session against the in-process mock broker. The
+    // graceful-DISCONNECT proof is timing-sensitive at the rumqttc stop seam
+    // (bounded flush window); a lost race retries the whole round trip once on
+    // a fresh broker before the row is called a GAP.
     let mqtt = tokio::time::timeout(STEP_BUDGET, mqtt_roundtrip(&bus)).await;
-    record(&bus, &mut ok, &mut gaps, "mqtt-test", unwrap_timeout(mqtt));
+    let mqtt = match unwrap_timeout(mqtt) {
+        Ok(detail) => Ok(detail),
+        Err(first) => match tokio::time::timeout(STEP_BUDGET, mqtt_roundtrip(&bus)).await {
+            Ok(Ok(detail)) => Ok(format!("{detail} — attempt 2 (attempt 1: {first})")),
+            _ => Err(first),
+        },
+    };
+    record(&bus, &mut ok, &mut gaps, "mqtt-test", mqtt);
 
     // Row: serial monitor — the pty-proxy relay captures both directions.
     let monitor = tokio::time::timeout(STEP_BUDGET, monitor_loopback(&bus)).await;
