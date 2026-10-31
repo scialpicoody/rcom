@@ -8,6 +8,7 @@
 //! runs on its own thread with a short read timeout and a cancel flag, so a session
 //! is always dropped within one read timeout, even on unplug.
 
+pub mod factory;
 pub mod hotplug;
 pub mod manager;
 pub mod mock;
@@ -23,6 +24,20 @@ use tokio::sync::mpsc;
 
 use crate::core::error::Result;
 
+pub use factory::BackendFactory;
+pub use mock::{MockControl, MockScenario, MockTrigger, MOCK_PORT_NAME};
+
+/// What kind of port a listing describes (design-ui §5.7: the UI's mock
+/// affordances key off `PortInfo::kind == Mock(_)` — never off an env var).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortKind {
+    /// A port of the real serial driver.
+    Real,
+    /// A mock port playing one of the [`MockScenario`]s (the hardware-free
+    /// seam; compiled in always, selected at runtime by the factory).
+    Mock(MockScenario),
+}
+
 /// A port as listed by a backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortInfo {
@@ -33,7 +48,16 @@ pub struct PortInfo {
     /// Human-readable description, when the OS provides one.
     pub description: Option<String>,
     /// Whether this port is provided by the mock backend (the demo seam).
-    pub is_mock: bool,
+    pub kind: PortKind,
+}
+
+impl PortInfo {
+    /// Whether this port is a mock (the demo seam). Presentation shorthand
+    /// over [`PortInfo::kind`] — kept because the port list, the reconnect
+    /// machine's name-only identities and the UI all branch on it.
+    pub fn is_mock(&self) -> bool {
+        matches!(self.kind, PortKind::Mock(_))
+    }
 }
 
 /// The configuration of an open port. This slice: baud; line format fixed 8N1
@@ -61,11 +85,16 @@ impl Default for PortConfig {
     }
 }
 
-/// One terminal event of a reader: a chunk of bytes, a fatal error, or the clean end
-/// of the stream. Fatal errors and closure both end the stream (no events after).
+/// One terminal event of a reader: a chunk of bytes, a note line, a fatal error,
+/// or the clean end of the stream. Fatal errors and closure both end the stream
+/// (no events after). Notes (the mock scenarios' `Note` timeline items) ride the
+/// same stream so they stay ordered with the data around them.
 #[derive(Debug)]
 pub enum ReadEvent {
     Data(Vec<u8>),
+    /// A note line (lifecycle text of the port, e.g. the mock's banner). The
+    /// session forwarder publishes it as a session-scoped log event.
+    Note(String),
     /// The reader died (unplug, driver error). The session closes; the string is a
     /// user-visible detail.
     Error(String),
@@ -96,6 +125,10 @@ pub struct OpenPort {
     /// Set to cancel the reader thread promptly (see the module doc: close never
     /// hangs). The backend's reader owns the same flag.
     pub cancel: Arc<AtomicBool>,
+    /// The playback control of a mock port (`None` for real ports). Surfaced
+    /// through the manager's `mock_controls(session_id)` — design-ui §5.7's
+    /// optional extension of the session handle.
+    pub control: Option<MockControl>,
 }
 
 /// A port provider: enumeration and opening. Implemented by the real serial driver

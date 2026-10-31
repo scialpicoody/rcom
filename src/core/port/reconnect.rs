@@ -262,6 +262,7 @@ impl ReconnectMachine {
                     level: LogLevel::Warn,
                     timestamp: chrono::Local::now(),
                     message: format!("reconnect attempt on {} failed: {error}", desired.name),
+                    session_id: Some(session_id),
                 }));
                 self.watch_again(desired, config, session_id, attempt + 1)
             }
@@ -327,7 +328,7 @@ mod tests {
             vid,
             pid,
             description: None,
-            is_mock: false,
+            kind: crate::core::port::PortKind::Real,
         }
     }
 

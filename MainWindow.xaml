@@ -2,24 +2,131 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="Rcom.MainWindow"
         Title="rcom"
-        Width="1120" Height="680">
-  <!-- The tracer-bullet layout with its right-hand quick-send bar (ticket #17)
-       and the bottom tabbed pane (ticket #19, design.md's "[ script editor |
-       terminal | tools | plot ] (tabbed pane)"; one Script tab for now — the
-       UI-shell ticket restyles it, lane2's tools page slots in beside it as a
-       second TabItem). Visible strings are set from the controller via `t!`
-       (the i18n dictionaries), so the XAML carries none. -->
-  <Grid RowDefinitions="*,Auto" Margin="8">
-    <Grid Grid.Row="0" ColumnDefinitions="*,320">
-      <!-- Left: log view on top, the toolbar/send bar below. -->
-      <Grid Grid.Column="0" RowDefinitions="*,Auto">
-        <ListBox x:Name="LogList"
-                 Grid.Row="0"
-                 FontSize="13" />
+        Width="1200" Height="760">
+  <!-- The #37 shell (design-ui §2): a top session tab strip as the window
+       shell, the modernized llcom-classic layout per session (log view with
+       the §3.3 toolbar, the session toolbar with chip/banner/mock drawer, the
+       send bar, quick-send docked right), and the bottom tabbed pane in the
+       fixed order Script | Terminal | Codec | Net | MQTT | Plot | Monitor |
+       Settings (§2.2). The Terminal tab is the #34 placeholder (caption/status
+       only). Visible strings are set from the controller via `t!` (the i18n
+       dictionaries), so the XAML carries none. -->
+  <Grid RowDefinitions="Auto,*,Auto" Margin="8">
 
-        <Grid Grid.Row="1"
-              ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,*,Auto"
-              Margin="0,8,0,0">
+    <!-- Row 0: the session tab strip (the window shell). One tab per session;
+         `+` opens the port picker; `✕` closes the active tab (closing a tab
+         with an open port rides the quit-guard pattern). The strip's tab
+         headers (name + ●/○ state) are set from the controller. -->
+    <Grid Grid.Row="0"
+          ColumnDefinitions="*,Auto,Auto"
+          Margin="0,0,0,4">
+      <TabControl x:Name="SessionTabs"
+                  Grid.Column="0"
+                  MinHeight="34" />
+      <Button x:Name="CloseTabButton"
+              Grid.Column="1"
+              MinWidth="36"
+              Margin="6,0,0,0" />
+      <Button x:Name="NewTabButton"
+              Grid.Column="2"
+              MinWidth="36"
+              Margin="4,0,0,0" />
+    </Grid>
+
+    <!-- Row 1: per-session content (the ACTIVE tab's view-model renders here;
+         the bottom pane and the toolbar switch with the active tab, §3.1). -->
+    <Grid Grid.Row="1" ColumnDefinitions="*,320">
+      <!-- Left: the §3.3 log toolbar, the log pane, the chip/banner row, the
+           session toolbar with the mock drawer, the send bar. -->
+      <Grid Grid.Column="0" RowDefinitions="Auto,*,Auto,Auto,Auto,Auto">
+
+        <!-- Log toolbar: view modes, filter, hide-sent + timestamps, follow,
+             Clear (all per-session presentation state — viewmodel state,
+             never core state, contract §5.3). -->
+        <Grid Grid.Row="0"
+              ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto,Auto"
+              Margin="0,0,0,4">
+          <CheckBox x:Name="FollowToggle"
+                    Grid.Column="0"
+                    VerticalAlignment="Center"
+                    Margin="0,0,6,0" />
+          <ComboBox x:Name="ViewModeSelector"
+                    Grid.Column="1"
+                    MinWidth="110"
+                    Margin="0,0,6,0" />
+          <TextBox x:Name="FilterBox"
+                   Grid.Column="2"
+                   MinWidth="180"
+                   Margin="0,0,6,0" />
+          <TextBlock x:Name="ShownStatus"
+                     Grid.Column="3"
+                     VerticalAlignment="Center"
+                     FontSize="11"
+                     Margin="0,0,6,0" />
+          <CheckBox x:Name="TimestampsToggle"
+                    Grid.Column="4"
+                    VerticalAlignment="Center"
+                    Margin="0,0,6,0" />
+          <CheckBox x:Name="HideSentToggle"
+                    Grid.Column="5"
+                    VerticalAlignment="Center"
+                    Margin="0,0,6,0" />
+          <Button x:Name="ClearLogButton"
+                  Grid.Column="6"
+                  MinWidth="60" />
+        </Grid>
+
+        <!-- The log pane: the §3.3 rows (time │ badge chip │ hex+text) built
+             per row in code — the virtualizing ListBox of the tracer bullet
+             gave way to the #30 prototype's approved row anatomy; rows never
+             animate and follow jumps to the end. -->
+        <ScrollViewer x:Name="LogScroller"
+                      Grid.Row="1"
+                      VerticalAlignment="Stretch">
+          <StackPanel x:Name="LogRows" Spacing="1" />
+        </ScrollViewer>
+
+        <!-- Chip + banner row (contract §5.4): the session state chip
+             (Closed grey / Open green / WatchDesired amber) + the
+             waiting-for-port banner + the one sanctioned indeterminate
+             ProgressBar (the port-open future > ~500 ms). -->
+        <Grid Grid.Row="2"
+              ColumnDefinitions="Auto,*,Auto"
+              Margin="0,4,0,0">
+          <Border x:Name="StateChip"
+                  Grid.Column="0"
+                  CornerRadius="3"
+                  Padding="8,1,8,1"
+                  VerticalAlignment="Center"
+                  Margin="0,0,8,0">
+            <TextBlock x:Name="StateChipText" FontSize="11" />
+          </Border>
+          <StackPanel x:Name="BannerPanel"
+                      Grid.Column="1"
+                      Orientation="Horizontal"
+                      Spacing="8"
+                      VerticalAlignment="Center">
+            <TextBlock x:Name="BannerText"
+                       FontSize="12"
+                       VerticalAlignment="Center"
+                       TextWrapping="Wrap" />
+            <Button x:Name="BannerCloseAllButton"
+                    MinWidth="80" />
+          </StackPanel>
+          <ProgressBar x:Name="OpenProgress"
+                       Grid.Column="2"
+                       MinWidth="90"
+                       Height="4"
+                       VerticalAlignment="Center" />
+        </Grid>
+
+        <!-- Session toolbar (§3.2): port row + the mock drawer button (mock
+             sessions only — keyed off PortInfo::kind). Parity/stop-bit
+             controls are not in the slice (fixed 8N1; the config model's
+             RequiresRestart rule lands with #35's config work). -->
+        <Grid Grid.Row="3"
+              ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+              Margin="0,4,0,0">
           <TextBlock x:Name="PortCaption"
                      Grid.Column="0"
                      VerticalAlignment="Center"
@@ -52,33 +159,93 @@
                     Grid.Column="7"
                     MinWidth="100"
                     Margin="0,0,6,0" />
-          <!-- The hide-sent filter: view-only (contract §2.1 — presentation options
-               are viewmodel state); the log store and auto-save file stay complete.
-               The content string comes from the controller (`t!("hide_sent")`). -->
-          <CheckBox x:Name="HideSentToggle"
-                    Grid.Column="8"
-                    Margin="0,0,12,0" />
+          <Button x:Name="MockDrawerButton"
+                  Grid.Column="8"
+                  MinWidth="70" />
+        </Grid>
+
+        <!-- The mock drawer (§6.1): playback controls of the active session's
+             mock port — visible only for mock sessions (mock_controls()
+             being Some / PortInfo::kind == Mock(_)). -->
+        <Grid x:Name="MockDrawer"
+              Grid.Row="4"
+              ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,*"
+              Margin="12,4,0,0">
+          <Button x:Name="MockPauseButton"
+                  Grid.Column="0"
+                  MinWidth="70"
+                  Margin="0,0,6,0" />
+          <Button x:Name="MockStepButton"
+                  Grid.Column="1"
+                  MinWidth="56"
+                  Margin="0,0,6,0" />
+          <ComboBox x:Name="MockSpeedSelector"
+                    Grid.Column="2"
+                    MinWidth="90"
+                    Margin="0,0,6,0" />
+          <TextBox x:Name="MockInjectBox"
+                   Grid.Column="3"
+                   MinWidth="120"
+                   Margin="0,0,6,0" />
+          <Button x:Name="MockInjectButton"
+                  Grid.Column="4"
+                  MinWidth="64"
+                  Margin="0,0,6,0" />
+          <Button x:Name="MockTriggerButton"
+                  Grid.Column="5"
+                  MinWidth="110"
+                  Margin="0,0,6,0" />
+          <Button x:Name="MockRestartButton"
+                  Grid.Column="6"
+                  MinWidth="80"
+                  HorizontalAlignment="Left" />
+        </Grid>
+
+        <!-- Send bar (§3.4): HEX toggle switches parsing; Enter sends; TX rows
+             show post-hook bytes; no send-bar hook toggle. -->
+        <Grid Grid.Row="5"
+              ColumnDefinitions="Auto,*,Auto"
+              Margin="0,4,0,0">
+          <CheckBox x:Name="HexSendCheck"
+                    Grid.Column="0"
+                    VerticalAlignment="Center"
+                    Margin="0,0,8,0" />
           <TextBox x:Name="SendBox"
-                   Grid.Column="9"
+                   Grid.Column="1"
                    Margin="0,0,6,0" />
           <Button x:Name="SendButton"
-                  Grid.Column="10"
+                  Grid.Column="2"
                   MinWidth="90" />
         </Grid>
       </Grid>
 
-      <!-- Right: the quick-send pages (10 pages, unlimited entries per page). -->
+      <!-- Right: the quick-send panel (§3.5): header + the ⌁ hook badge
+           (flips with the session's pre-send hook), 10-page pager, the
+           edit-in-place entries, the add/save/delete editor. -->
       <Grid Grid.Column="1"
             RowDefinitions="Auto,Auto,*,Auto"
             Margin="12,0,0,0">
-        <StackPanel Grid.Row="0"
-                    Orientation="Horizontal"
-                    Spacing="8">
-          <TextBlock x:Name="QuickSendTitle"
-                     FontSize="13" />
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,2">
+          <StackPanel Grid.Column="0"
+                      Orientation="Horizontal"
+                      Spacing="8">
+            <TextBlock x:Name="QuickSendTitle"
+                       FontSize="14"
+                       VerticalAlignment="Center" />
+            <Border x:Name="QuickSendHookBadge"
+                    CornerRadius="3"
+                    Padding="6,1,6,1"
+                    VerticalAlignment="Center">
+              <TextBlock x:Name="QuickSendHookBadgeText"
+                         FontSize="10"
+                         FontFamily="Menlo, Consolas, DejaVu Sans Mono" />
+            </Border>
+          </StackPanel>
           <TextBlock x:Name="QuickSendPageLabel"
-                     FontSize="11" />
-        </StackPanel>
+                     Grid.Column="1"
+                     FontSize="11"
+                     VerticalAlignment="Center" />
+        </Grid>
 
         <PipsPager x:Name="QuickSendPager"
                    Grid.Row="1"
@@ -125,13 +292,19 @@
       </Grid>
     </Grid>
 
-    <!-- Bottom: the tabbed pane (ticket #19). One Script tab: file row (picker +
-         name + new/save/delete + run/stop), the TX pre-send hook affordance, the
-         monospaced editor (font set in code — not XAML-settable at this pin). -->
+    <!-- Row 2: the bottom tabbed pane in the fixed §2.2 order: Script |
+         Terminal | Codec | Net | MQTT | Plot | Monitor | Settings. The
+         Terminal tab is the #34 placeholder (caption/status only — its page
+         is ticket #34's; the merge is a simple TabItem splice). -->
     <TabControl x:Name="BottomTabs"
-                Grid.Row="1"
+                Grid.Row="2"
                 Height="230"
                 Margin="0,8,0,0">
+
+      <!-- The Script page (ticket #19): file row (picker + name + new/save/
+           delete + Run (primary)/Stop), the TX pre-send hook affordance, the
+           monospaced editor (font set in code — not XAML-settable at this
+           pin). -->
       <TabItem x:Name="ScriptTab">
         <Grid Margin="8" RowDefinitions="Auto,Auto,*">
           <!-- Script file row. -->
@@ -172,7 +345,9 @@
                     MinWidth="56" />
           </Grid>
 
-          <!-- The TX pre-send hook: one script per session (empty = disabled). -->
+          <!-- The TX pre-send hook: one script per session (empty = disabled).
+               Arming it flips the quick-send `⌁ hook` badge and puts the
+               `⌁hook` marker on the session's TX rows. -->
           <Grid Grid.Row="1"
                 ColumnDefinitions="Auto,*,Auto"
                 Margin="0,0,0,6">
@@ -194,6 +369,86 @@
           <TextBox x:Name="ScriptEditor"
                    Grid.Row="2"
                    FontSize="13" />
+        </Grid>
+      </TabItem>
+
+      <!-- The Terminal page placeholder (ticket #34): caption/status only at
+           this ticket — the shell slot is fixed so #34's merge is a simple
+           TabItem splice (the strip is at its final order already). -->
+      <TabItem x:Name="TerminalTab">
+        <Grid Margin="8" RowDefinitions="Auto,*">
+          <TextBlock x:Name="TerminalStatus"
+                     Grid.Row="0"
+                     FontSize="12"
+                     VerticalAlignment="Center" />
+          <TextBlock x:Name="TerminalEmpty"
+                     Grid.Row="1"
+                     FontSize="12"
+                     HorizontalAlignment="Center"
+                     VerticalAlignment="Center"
+                     TextAlignment="Center" />
+        </Grid>
+      </TabItem>
+
+      <!-- The codec toolbox page (issue #22): encoding conversion (A→B with
+           the charset pickers), hex/base64/percent codecs, and the garbled-text
+           recovery (its candidates land in CodecCandidates, click applies).
+           The XAML carries no visible strings — src/app/tools_codec.rs sets
+           every label from the i18n dictionaries and wires the controls by
+           these names (multiline + monospaced font are set in code, like the
+           script editor). -->
+      <TabItem x:Name="CodecTab">
+        <Grid RowDefinitions="Auto,Auto,*,Auto,*,Auto" Margin="4">
+          <!-- Operation row: the codec selector, the A→B charsets with the
+               direction swap between them, the input-is-hex toggle, run. -->
+          <StackPanel Grid.Row="0"
+                      Orientation="Horizontal"
+                      Spacing="6">
+            <ComboBox x:Name="CodecOpSelector"
+                      MinWidth="140" />
+            <ComboBox x:Name="CodecFromSelector"
+                      MinWidth="92" />
+            <Button x:Name="CodecSwapButton"
+                    MinWidth="36" />
+            <ComboBox x:Name="CodecToSelector"
+                      MinWidth="92" />
+            <CheckBox x:Name="CodecHexCheck"
+                      VerticalAlignment="Center" />
+            <Button x:Name="CodecRunButton"
+                    MinWidth="84" />
+          </StackPanel>
+
+          <StackPanel Grid.Row="1"
+                      Orientation="Horizontal"
+                      Spacing="12"
+                      Margin="0,4,0,2">
+            <TextBlock x:Name="CodecInputCaption"
+                       FontSize="12" />
+            <TextBlock x:Name="CodecStatus"
+                       FontSize="12"
+                       VerticalAlignment="Center" />
+          </StackPanel>
+
+          <TextBox x:Name="CodecInputBox"
+                   Grid.Row="2"
+                   FontSize="13" />
+
+          <TextBlock x:Name="CodecOutputCaption"
+                     Grid.Row="3"
+                     FontSize="12"
+                     Margin="0,4,0,2" />
+
+          <!-- The output stays read-only and selectable (Ctrl+C copies). -->
+          <TextBox x:Name="CodecOutputBox"
+                   Grid.Row="4"
+                   FontSize="13" />
+
+          <!-- The garbled-recovery candidates (best first; a click applies). -->
+          <ListBox x:Name="CodecCandidates"
+                   Grid.Row="5"
+                   Height="58"
+                   FontSize="12"
+                   Margin="0,4,0,0" />
         </Grid>
       </TabItem>
 
@@ -246,10 +501,18 @@
                     MinWidth="70" />
           </StackPanel>
 
-          <ListBox x:Name="NetLog"
-                   Grid.Row="4"
-                   FontSize="12"
-                   Margin="0,6,0,0" />
+          <Grid Grid.Row="4" Margin="0,6,0,0">
+            <ListBox x:Name="NetLog"
+                     FontSize="12" />
+            <TextBlock x:Name="NetEmpty"
+                       FontSize="12"
+                       Opacity="0.6"
+                       TextAlignment="Center"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Margin="16,8,16,8"
+                       TextWrapping="Wrap" />
+          </Grid>
         </Grid>
       </TabItem>
 
@@ -327,10 +590,18 @@
                        VerticalAlignment="Center" />
           </StackPanel>
 
-          <ListBox x:Name="MqttLog"
-                   Grid.Row="4"
-                   FontSize="12"
-                   Margin="0,6,0,0" />
+          <Grid Grid.Row="4" Margin="0,6,0,0">
+            <ListBox x:Name="MqttLog"
+                     FontSize="12" />
+            <TextBlock x:Name="MqttEmpty"
+                       FontSize="12"
+                       Opacity="0.6"
+                       TextAlignment="Center"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Margin="16,8,16,8"
+                       TextWrapping="Wrap" />
+          </Grid>
         </Grid>
       </TabItem>
 
@@ -361,10 +632,20 @@
                        VerticalAlignment="Center" />
           </StackPanel>
 
-          <!-- The custom plot control lands here (added in code). -->
+          <!-- The custom plot control lands here (added in code); the
+               empty-state caption sits beneath it until data arrives. -->
           <Grid x:Name="PlotHost"
                 Grid.Row="1"
-                Margin="0,6,0,0" />
+                Margin="0,6,0,0">
+            <TextBlock x:Name="PlotEmpty"
+                       FontSize="12"
+                       Opacity="0.6"
+                       TextAlignment="Center"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Margin="16,8,16,8"
+                       TextWrapping="Wrap" />
+          </Grid>
 
           <StackPanel Grid.Row="2"
                       Orientation="Horizontal"
@@ -387,69 +668,7 @@
         </Grid>
       </TabItem>
 
-<!-- The codec toolbox page (issue #22): encoding conversion (A→B with the
-           charset pickers), hex/base64/percent codecs, and the garbled-text
-           recovery (its candidates land in CodecCandidates, click applies).
-           The XAML carries no visible strings — src/app/tools_codec.rs sets
-           every label from the i18n dictionaries and wires the controls by
-           these names (multiline + monospaced font are set in code, like the
-           script editor). -->
-      <TabItem x:Name="CodecTab">
-        <Grid RowDefinitions="Auto,Auto,*,Auto,*,Auto" Margin="4">
-          <!-- Operation row: the codec selector, the A→B charsets with the
-               direction swap between them, the input-is-hex toggle, run. -->
-          <StackPanel Grid.Row="0"
-                      Orientation="Horizontal"
-                      Spacing="6">
-            <ComboBox x:Name="CodecOpSelector"
-                      MinWidth="140" />
-            <ComboBox x:Name="CodecFromSelector"
-                      MinWidth="92" />
-            <Button x:Name="CodecSwapButton"
-                    MinWidth="36" />
-            <ComboBox x:Name="CodecToSelector"
-                      MinWidth="92" />
-            <CheckBox x:Name="CodecHexCheck"
-                      VerticalAlignment="Center" />
-            <Button x:Name="CodecRunButton"
-                    MinWidth="84" />
-          </StackPanel>
-
-          <StackPanel Grid.Row="1"
-                      Orientation="Horizontal"
-                      Spacing="12"
-                      Margin="0,4,0,2">
-            <TextBlock x:Name="CodecInputCaption"
-                       FontSize="12" />
-            <TextBlock x:Name="CodecStatus"
-                       FontSize="12"
-                       VerticalAlignment="Center" />
-          </StackPanel>
-
-          <TextBox x:Name="CodecInputBox"
-                   Grid.Row="2"
-                   FontSize="13" />
-
-          <TextBlock x:Name="CodecOutputCaption"
-                     Grid.Row="3"
-                     FontSize="12"
-                     Margin="0,4,0,2" />
-
-          <!-- The output stays read-only and selectable (Ctrl+C copies). -->
-          <TextBox x:Name="CodecOutputBox"
-                   Grid.Row="4"
-                   FontSize="13" />
-
-          <!-- The garbled-recovery candidates (best first; a click applies). -->
-          <ListBox x:Name="CodecCandidates"
-                   Grid.Row="5"
-                   Height="58"
-                   FontSize="12"
-                   Margin="0,4,0,0" />
-        </Grid>
-      </TabItem>
-
-<!-- The serial monitor page (issue #23). The XAML carries no visible
+      <!-- The serial monitor page (issue #23). The XAML carries no visible
            strings — src/app/tools_monitor.rs sets every label from the i18n
            dictionaries and wires the controls by these names. The virtual port
            path lives in a read-only TextBox so it stays copyable. -->
@@ -485,14 +704,22 @@
                        VerticalAlignment="Center" />
           </StackPanel>
 
-          <ListBox x:Name="MonitorLog"
-                   Grid.Row="2"
-                   FontSize="12"
-                   Margin="0,6,0,0" />
+          <Grid Grid.Row="2" Margin="0,6,0,0">
+            <ListBox x:Name="MonitorLog"
+                     FontSize="12" />
+            <TextBlock x:Name="MonitorEmpty"
+                       FontSize="12"
+                       Opacity="0.6"
+                       TextAlignment="Center"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Margin="16,8,16,8"
+                       TextWrapping="Wrap" />
+          </Grid>
         </Grid>
       </TabItem>
 
-<!-- The settings page (issue #25): the app-global page of the bottom pane —
+      <!-- The settings page (issue #25): the app-global page of the bottom pane —
            launch defaults (port/baud/encoding), the log directory override,
            language, theme and motion. The XAML carries no visible strings —
            src/app/tools_settings.rs sets every label from the i18n

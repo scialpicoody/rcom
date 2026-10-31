@@ -42,7 +42,7 @@ pub mod plot;
 pub mod port;
 
 pub use bus::{
-    Event, EventBus, LogEvent, LogLevel, PlotEvent, PlotEventKind, PortEvent, PortState,
+    DataEvent, Event, EventBus, LogEvent, LogLevel, PlotEvent, PlotEventKind, PortEvent, PortState,
     ScriptOutEvent, ScriptOutKind,
 };
 pub use error::{CoreError, Result};

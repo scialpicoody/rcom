@@ -49,6 +49,8 @@ struct MonitorPage {
     port_box: Ref<TextBox>,
     mode_story: Ref<TextBlock>,
     log: Ref<ListBox>,
+    /// The §4.1 empty-state caption (naming the next action).
+    empty: Ref<TextBlock>,
     /// The monitor this page currently drives, if any.
     monitor: Cell<Option<u64>>,
     /// Whether that monitor counts as running (the Start/Stop button follows).
@@ -65,6 +67,9 @@ impl MonitorPage {
         self.port_caption.set_text(Some(&t!("monitor_port_caption")));
         self.start.set_content(Some(Rc::new(t!("monitor_start").to_string())));
         self.status.set_text(Some(&t!("monitor_status_idle")));
+        // §4.1: one accent primary action + the empty-state caption.
+        super::ui_patterns::accent(&self.start);
+        self.empty.set_text(Some(&t!("monitor_empty")));
         // The platform story: pty proxy here, the license verdict on Windows.
         self.mode_story.set_text(Some(&t!("monitor_mode_story")));
         self.baud_box.set_text(Some(&DEFAULT_BAUD.to_string()));
@@ -90,7 +95,7 @@ impl MonitorPage {
             .unwrap_or_default();
         for info in self.ports.borrow().iter() {
             let name = match &info.description {
-                Some(description) if !info.is_mock => {
+                Some(description) if !info.is_mock() => {
                     format!("{}  ({description})", info.name)
                 }
                 _ => info.name.clone(),
@@ -163,6 +168,8 @@ impl MonitorPage {
 
     /// One row into the page's list (capped; the newest visible, auto-scrolled).
     fn append_page_row(&self, text: String) {
+        // First data: the empty caption disappears and never returns (§4.1).
+        self.empty.set_is_visible(false);
         let items = self.log.items();
         if self.log.item_count() >= PAGE_ROW_CAP as i32 {
             items.remove_at(0);
@@ -246,6 +253,7 @@ pub fn attach(element: &Ref<StyledElement>) {
         port_box: NameScopeExtensions::get(element, "MonitorPortBox"),
         mode_story: NameScopeExtensions::get(element, "MonitorModeStory"),
         log: NameScopeExtensions::get(element, "MonitorLog"),
+        empty: NameScopeExtensions::get(element, "MonitorEmpty"),
         monitor: Cell::new(None),
         running: Cell::new(false),
         ports: RefCell::new(Vec::new()),

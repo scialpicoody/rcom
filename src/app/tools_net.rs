@@ -55,6 +55,9 @@ struct NetPage {
     send_box: Ref<TextBox>,
     send_button: Ref<Button>,
     log: Ref<ListBox>,
+    /// The §4.1 empty-state caption (naming the next action; disappears on
+    /// first data and never returns).
+    empty: Ref<TextBlock>,
     /// The channel this page currently drives, if any.
     channel: Cell<Option<u64>>,
     /// Whether that channel counts as running (the Start/Stop button follows).
@@ -74,6 +77,9 @@ impl NetPage {
         self.start.set_content(Some(Rc::new(t!("net_start").to_string())));
         self.send_button.set_content(Some(Rc::new(t!("net_send").to_string())));
         self.status.set_text(Some(&t!("net_idle")));
+        // §4.1: exactly one accent primary action per page header.
+        super::ui_patterns::accent(&self.start);
+        self.empty.set_text(Some(&t!("net_empty")));
 
         self.protocol.set_selected_index(-1);
         let protocols = self.protocol.items();
@@ -203,6 +209,8 @@ impl NetPage {
 
     /// One row into the page's list (capped; the newest visible, auto-scrolled).
     fn append_page_row(&self, text: String) {
+        // First data: the empty caption disappears and never returns (§4.1).
+        self.empty.set_is_visible(false);
         let items = self.log.items();
         if self.log.item_count() >= PAGE_ROW_CAP as i32 {
             items.remove_at(0);
@@ -299,6 +307,7 @@ pub fn attach(element: &Ref<StyledElement>) {
         send_box: NameScopeExtensions::get(element, "NetSendBox"),
         send_button: NameScopeExtensions::get(element, "NetSendButton"),
         log: NameScopeExtensions::get(element, "NetLog"),
+        empty: NameScopeExtensions::get(element, "NetEmpty"),
         channel: Cell::new(None),
         running: Cell::new(false),
     });

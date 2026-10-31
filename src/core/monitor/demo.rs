@@ -240,5 +240,5 @@ async fn wait_event<T>(
 /// One `##` row on the log view + the trace evidence.
 fn note(bus: &EventBus, message: String, level: LogLevel) {
     tracing::info!("{message}");
-    bus.publish(Event::Log(LogEvent { level, timestamp: chrono::Local::now(), message }));
+    bus.publish(Event::Log(LogEvent { level, timestamp: chrono::Local::now(), message, session_id: None }));
 }

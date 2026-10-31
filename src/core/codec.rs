@@ -520,6 +520,7 @@ pub mod demo {
             level,
             timestamp: chrono::Local::now(),
             message: text,
+            session_id: None,
         }));
     }
 

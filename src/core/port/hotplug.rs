@@ -89,7 +89,7 @@ mod tests {
             vid,
             pid,
             description: None,
-            is_mock: false,
+            kind: crate::core::port::PortKind::Real,
         }
     }
 

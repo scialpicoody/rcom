@@ -327,6 +327,7 @@ fn drain_serial_upstream(
                 }));
                 write_fd_all(app.master, &bytes, stop)?;
             }
+            Ok(ReadEvent::Note(_)) => {} // engine notes are not monitor traffic
             Ok(ReadEvent::Error(error)) => {
                 return Err(format!("the upstream port reader died: {error}"));
             }
