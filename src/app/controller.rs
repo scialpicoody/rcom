@@ -671,8 +671,18 @@ impl MainController {
             vm.title = port.name.clone();
             vm.port = Some(port.clone());
             vm.open_pending = true;
+            // Ticket #35: the tab's quick-send set re-keys to this port's
+            // override layer (the shared default set until the port owns one);
+            // page state resets with it.
+            vm.quick = QuickSendStore::load_for(&port.name);
+            vm.quick_page = 0;
+            vm.quick_editing = None;
             // A hook armed before this open flushes to the session on bind.
         }
+        // The panel reflects the re-keyed set immediately.
+        self.quick_pager.set_selected_page_index(0);
+        self.update_quick_page_label();
+        self.rebuild_quick_entries();
         let tab_id = vm.borrow().tab_id;
         self.pending_opens.borrow_mut().insert(port.name.clone(), tab_id);
         // Busy rule (§4.1): the open button greys until the open's outcome
@@ -1333,10 +1343,13 @@ impl MainController {
         self.persist_quick_entries();
     }
 
-    /// Persists and refreshes the panel after any mutation.
+    /// Persists and refreshes the panel after any mutation. A tab bound to a
+    /// port writes that port's own override file (ticket #35's per-session
+    /// quick-send sets); an unbound tab writes the shared default profile.
     fn persist_quick_entries(&self) {
         let Some(vm) = self.active_vm() else { return };
-        vm.borrow().quick.save();
+        let port = vm.borrow().port.as_ref().map(|info| info.name.clone());
+        vm.borrow().quick.save_for(port.as_deref());
         if let Some(vm) = self.active_vm() {
             vm.borrow_mut().quick_editing = None;
         }
@@ -1657,6 +1670,7 @@ impl MainController {
             UiMsg::Row { session_id, text, direction } => {
                 self.apply_row(session_id, text, direction)
             }
+            UiMsg::OpenFailed { port, error } => self.apply_open_failed(&port, &error),
             UiMsg::Data(data) => self.apply_data(data),
             UiMsg::Ports(ports) => self.show_ports(ports),
             UiMsg::PortState { session_id, port, state, detail, row } => {
@@ -1702,6 +1716,35 @@ impl MainController {
             hooked: data.hooked,
         };
         self.push_line_to(&vm, line);
+    }
+
+    /// An open command failed synchronously (PortBusy `AlreadyOpen`, device
+    /// gone, driver error — ticket #35): the tab that asked clears its
+    /// open-pending state and carries the error row (per session, never
+    /// global). Without a pending entry (a demo open), the active tab carries
+    /// the row.
+    fn apply_open_failed(&self, port: &str, error: &str) {
+        let pending = self
+            .pending_opens
+            .borrow_mut()
+            .remove(port)
+            .and_then(|tab_id| {
+                self.tabs
+                    .borrow()
+                    .iter()
+                    .find(|vm| vm.borrow().tab_id == tab_id)
+                    .cloned()
+            });
+        let Some(vm) = pending.or_else(|| self.active_vm()) else { return };
+        vm.borrow_mut().open_pending = false;
+        self.disarm_open_progress();
+        let message = t!("open_failed", name = port, error = error).to_string();
+        let is_active = self.active_vm().is_some_and(|active| Rc::ptr_eq(&active, &vm));
+        self.push_line_to(&vm, LogLine::Note { text: message, error: true });
+        if is_active {
+            self.open_close.set_is_enabled(!vm.borrow().open_pending);
+        }
+        self.sync_tab_headers();
     }
 
     /// Pushes a line into `vm`'s model and — when the tab is the active one
