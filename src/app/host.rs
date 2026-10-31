@@ -25,6 +25,7 @@
 //!   controller). Beside these, `RCOM_CODECDEMO=1` runs the codec toolbox's pure
 //!   conversion/recovery proofs (issue #22; see `core::codec::demo`).
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -65,6 +66,11 @@ pub enum Command {
     /// The script panel's Run: (re)boots the standalone script VM with this code
     /// (ticket #19). Output flows back as `~~` log rows.
     RunScript { code: String },
+    /// Runs `code` in a fresh VM **bound to session `session_id`** (ticket #35):
+    /// the VM's uart writes go to that session, its rows route to the session's
+    /// tab, and the VM dies with the session (the cleanup AC). The demo harness
+    /// and the cross-session scripts use it; a UI button is later work.
+    RunSessionScript { session_id: u64, code: String },
     /// The script panel's Stop: stops the standalone VM (instruction-count hook
     /// unwinds even a hard loop).
     StopScript,
@@ -138,6 +144,11 @@ pub enum UiMsg {
     /// lines) — the hide-sent filter works on this, view-side only; data
     /// chunks travel as [`UiMsg::Data`].
     Row { session_id: Option<u64>, text: String, direction: Option<Direction> },
+    /// An open command failed synchronously (PortBusy `AlreadyOpen`, device
+    /// gone, driver error): the pending tab clears its open-pending state and
+    /// carries the error row (ticket #35 — the failure surfaces per session,
+    /// never global).
+    OpenFailed { port: String, error: String },
     /// A data chunk; the UI renders it with the session's current encoding.
     Data(DataRowMsg),
     /// Autodemo drives the encoding switch (the same code path as the selector).
@@ -183,7 +194,7 @@ fn selected_mock_mode() -> MockMode {
     }
     match AutodemoMode::from_env() {
         AutodemoMode::Reconnect => MockMode::Single(MockScenario::Unplug),
-        AutodemoMode::Multi => MockMode::All,
+        AutodemoMode::Multi | AutodemoMode::Cross => MockMode::All,
         AutodemoMode::Noisy => MockMode::Single(MockScenario::Noisy),
         AutodemoMode::Off => {
             if luademo_enabled() || plotdemo_enabled() {
@@ -201,6 +212,9 @@ fn start_engine() -> CoreHost {
     let factory = BackendFactory::with_mode(selected_mock_mode());
     let backend: Arc<dyn rcom::core::port::SerialBackend> = Arc::new(factory);
     let manager = Arc::new(PortManager::new(Arc::clone(&backend), bus.clone()));
+    // The `rcom.ports` Lua API's anchor: cross-session scripts resolve the
+    // manager through this process-global handle (ticket #35).
+    manager.init_global();
     let (commands_tx, commands_rx) = mpsc::unbounded_channel::<Command>();
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiMsg>();
 
@@ -311,6 +325,11 @@ pub enum AutodemoMode {
     /// AC7's evidence path: MOCK0 + MOCK1 as two sessions (two tabs), traffic
     /// to each, one closed, the other still streaming.
     Multi,
+    /// Ticket #35's evidence path: MOCK0 + MOCK1, then a script **bound to
+    /// session A** enumerates `rcom.ports` and cross-sends through session B —
+    /// B's TX row carries the script-driven bytes (A unaffected); A's VM stops
+    /// when A closes and B keeps streaming (the cleanup proof).
+    Cross,
     /// AC8's evidence path: the noisy scenario at 8× for ~10 s (the pump
     /// budget traces are the responsiveness proof).
     Noisy,
@@ -320,7 +339,8 @@ impl AutodemoMode {
     /// Reads `RCOM_AUTODEMO`: `1` = basic, `reconnect` = the unplug/replug path,
     /// `encoding` = the GBK path, `persist` = the quick-send persistence path,
     /// `hook` = the pre-send-hook path, `panel` = the script-panel Run/Stop path,
-    /// else off.
+    /// `multi` = the two-session path, `cross` = the cross-session scripting
+    /// path, else off.
     pub fn from_env() -> Self {
         match std::env::var("RCOM_AUTODEMO").as_deref() {
             Ok("1") => Self::Basic,
@@ -330,6 +350,7 @@ impl AutodemoMode {
             Ok("hook") => Self::Hook,
             Ok("panel") => Self::Panel,
             Ok("multi") => Self::Multi,
+            Ok("cross") => Self::Cross,
             Ok("noisy") => Self::Noisy,
             _ => Self::Off,
         }
@@ -375,7 +396,9 @@ async fn driver(
     // event (published by the driver's Port arm below).
     let (demo_id_tx, demo_id_rx) = mpsc::unbounded_channel::<u64>();
     let demo_id_tx = match AutodemoMode::from_env() {
-        AutodemoMode::Reconnect | AutodemoMode::Multi | AutodemoMode::Noisy => Some(demo_id_tx),
+        AutodemoMode::Reconnect | AutodemoMode::Multi | AutodemoMode::Cross | AutodemoMode::Noisy => {
+            Some(demo_id_tx)
+        }
         _ => None,
     };
     let requested = AutodemoMode::from_env();
@@ -542,6 +565,50 @@ async fn driver(
                 );
             });
         }
+        AutodemoMode::Cross => {
+            tracing::info!(
+                "RCOM_AUTODEMO=cross: driving the cross-session scripting path (MOCK0 + \
+                 MOCK1; a script on session A enumerates rcom.ports and sends through \
+                 session B; then A closes — its VM stops — and B keeps streaming)"
+            );
+            let demo = commands_tx.clone();
+            let mut id_rx = demo_id_rx;
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = demo.send(Command::Open { name: "MOCK0".into(), baud: 115_200 });
+                let first = id_rx.recv().await;
+                let _ = demo.send(Command::Open { name: "MOCK1".into(), baud: 115_200 });
+                let second = id_rx.recv().await;
+                let (Some(first), Some(second)) = (first, second) else { return };
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                // A marker ping on A (identifies A's session id in the event arm).
+                let _ = demo.send(Command::SendBytes {
+                    session_id: Some(first),
+                    bytes: b"a-ping".to_vec(),
+                });
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                // THE AC: a script on session A addresses session B through
+                // rcom.ports — the bytes leave on B's TX path.
+                let _ = demo.send(Command::RunSessionScript {
+                    session_id: first,
+                    code: CROSS_DEMO_SCRIPT.into(),
+                });
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+                // Cleanup: closing A stops A's VM (the driver watches the close)
+                // and leaves B untouched and streaming.
+                let _ = demo.send(Command::CloseSession { session_id: first });
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let _ = demo.send(Command::SendBytes {
+                    session_id: Some(second),
+                    bytes: b"after-a-closed".to_vec(),
+                });
+                tracing::info!(
+                    "AUTODEMO CROSS: sessions {first} (script host) and {second} (target) \
+                     driven — B's TX must carry the script's bytes, then B streams after \
+                     A's close"
+                );
+            });
+        }
         AutodemoMode::Noisy => {
             tracing::info!(
                 "RCOM_AUTODEMO=noisy: driving the 8× responsiveness path (noisy MOCK0, \
@@ -596,6 +663,21 @@ async fn driver(
     // The panel demo's two proofs: the Run print surfaced, the Stop unwound.
     let mut panel_demo_ran = false;
     let mut panel_stop_ok = false;
+    // Per-session script VMs (ticket #35): `RunSessionScript` boots one bound
+    // to a session; the registry drops it when the session dies (the cleanup
+    // AC — ports/VMs/logstores cleaned up, others untouched). A per-session
+    // generation counter rejects superseded starts, like the panel VM's.
+    let mut session_vms: HashMap<u64, LuaRuntime> = HashMap::new();
+    let mut session_vm_generations: HashMap<u64, u64> = HashMap::new();
+    let (session_vm_ready_tx, mut session_vm_ready_rx) =
+        tokio::sync::mpsc::unbounded_channel::<SessionVmReady>();
+    // The cross demo's evidence chain: A identified by its `a-ping` TX, the
+    // script's `cross-hello` must leave on B (never on A), and B streams after
+    // A's close (the cleanup proof).
+    let mut cross_first: Option<u64> = None;
+    let mut cross_via: Option<u64> = None;
+    let mut cross_send_ok = false;
+    let mut cross_cleanup_ok = false;
     // The plot decoder (issue #24): Start/Stop from the plot page (and the
     // PLOTDEMO's bundled decoder) boot it like the script-panel VM — on a
     // blocking task, adopted through a generation counter. The feed itself
@@ -620,12 +702,47 @@ async fn driver(
                         &mut panel_vm,
                         &mut panel_generation,
                         panel_ready_tx.clone(),
+                        &mut session_vm_generations,
+                        session_vm_ready_tx.clone(),
                         &mut plot_decoder,
                         &mut plot_generation,
                         plot_ready_tx.clone(),
                         command,
                     )
                     .await
+                }
+            },
+            ready = session_vm_ready_rx.recv() => match ready {
+                None => break, // the sender is gone: app shutting down
+                Some(arriving) => {
+                    let superseded = session_vm_generations.get(&arriving.session_id).copied()
+                        != Some(arriving.generation);
+                    match arriving.vm {
+                        Ok(vm) if superseded || vm.is_stopped() => vm.stop(),
+                        Ok(vm) => {
+                            if manager.session_alive(arriving.session_id).await {
+                                tracing::info!(session = arriving.session_id, "session script VM started");
+                                if let Some(old) = session_vms.insert(arriving.session_id, vm) {
+                                    old.stop();
+                                }
+                            } else {
+                                // The session died while its VM was booting: the
+                                // registry slot is gone, so the VM goes too.
+                                tracing::info!(
+                                    session = arriving.session_id,
+                                    "session gone before its VM started; stopping the VM"
+                                );
+                                vm.stop();
+                            }
+                        }
+                        Err(error) => {
+                            let _ = ui.send(UiMsg::Row {
+                                session_id: Some(arriving.session_id),
+                                text: rust_i18n::t!("script_run_failed", error = &error).to_string(),
+                                direction: None,
+                            });
+                        }
+                    }
                 }
             },
             ready = panel_ready_rx.recv() => match ready {
@@ -796,6 +913,56 @@ async fn driver(
                                 _ => {}
                             }
                         }
+                        // Cross-session evidence (ticket #35): the script's
+                        // bytes leave on the TARGET session's wire (never on
+                        // the script host's), and the target streams after the
+                        // host closed (its VM died with it — the cleanup AC).
+                        if mode == AutodemoMode::Cross && data.direction == Direction::Tx {
+                            match data.bytes.as_slice() {
+                                b"a-ping" => cross_first = Some(data.session_id),
+                                b"cross-hello" => {
+                                    if !cross_send_ok {
+                                        cross_send_ok = true;
+                                        cross_via = Some(data.session_id);
+                                        if Some(data.session_id) == cross_first {
+                                            tracing::error!(
+                                                "AUTODEMO CROSS FAILED: the script's bytes \
+                                                 left on the script host's own session"
+                                            );
+                                        } else {
+                                            tracing::info!(
+                                                "AUTODEMO CROSS SEND OK: 'cross-hello' left \
+                                                 on session {}'s TX path (the script ran on \
+                                                 another session — the target's TX row is \
+                                                 the evidence)",
+                                                data.session_id
+                                            );
+                                        }
+                                    }
+                                }
+                                b"after-a-closed" => {
+                                    let via = cross_via;
+                                    let ok = cross_send_ok
+                                        && cross_first.is_some()
+                                        && via.is_some_and(|id| Some(id) != cross_first)
+                                        && Some(data.session_id) == via;
+                                    if ok && !cross_cleanup_ok {
+                                        cross_cleanup_ok = true;
+                                        tracing::info!(
+                                            "AUTODEMO CROSS OK: session {:?}'s script \
+                                             enumerated rcom.ports and drove session {:?}'s \
+                                             TX ('cross-hello' left on the target's wire, \
+                                             nothing on the host), and the target still \
+                                             streamed after the host closed (per-session \
+                                             VM cleanup, no cross-talk)",
+                                            cross_first,
+                                            via,
+                                        );
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     // Lua demo: boot the sample VM as soon as MOCK0 is open; feed
                     // it exactly one RX chunk (the `ping` echo) — its own `ok!`
@@ -916,6 +1083,19 @@ async fn driver(
                         }
                     }
                     if let Event::Port(port) = &event {
+                        // Session cleanup (ticket #35): a dead session's script
+                        // VM dies with it — the registry drops the handle and
+                        // stops the VM (timers abort, running Lua unwinds).
+                        // Other sessions' VMs are untouched.
+                        if matches!(port.state, PortState::Closed | PortState::Error) {
+                            if let Some(vm) = session_vms.remove(&port.session_id) {
+                                tracing::info!(
+                                    session = port.session_id,
+                                    "session closed: stopping its script VM"
+                                );
+                                vm.stop();
+                            }
+                        }
                         match port.state {
                             PortState::WatchDesired => tracing::info!(
                                 "AUTODEMO: unplug detected → WatchDesired (waiting for {})",
@@ -1050,21 +1230,48 @@ async fn driver(
     if let Some(vm) = panel_vm {
         vm.stop();
     }
+    for (_, vm) in session_vms.drain() {
+        vm.stop();
+    }
     if let Some(decoder) = plot_decoder {
         decoder.stop();
     }
 }
 
-/// The sink for script VMs' `apiSendUartData`: raw writes to the open session.
+/// The sink for script VMs' `apiSendUartData`: raw writes to the VM's session.
 /// Raw on purpose (llcom parity): the pre-send hook transforms *UI* sends; a
 /// script's uart writes are already final and must not be converted twice.
-struct ScriptSink(Arc<PortManager>);
+/// Session-bound when the VM belongs to a session (ticket #35 — a script VM
+/// writes to ITS session, not to whatever opened last); the standalone panel
+/// VM keeps the legacy current-session path.
+struct ScriptSink {
+    manager: Arc<PortManager>,
+    /// The session this VM writes to (`None` = the legacy current session).
+    session: Option<u64>,
+}
+
+impl ScriptSink {
+    /// A sink bound to `session_id` (the per-session script VMs).
+    fn for_session(manager: &Arc<PortManager>, session_id: u64) -> Self {
+        Self { manager: Arc::clone(manager), session: Some(session_id) }
+    }
+
+    /// The standalone panel VM's sink (the legacy current-session path).
+    fn standalone(manager: &Arc<PortManager>) -> Self {
+        Self { manager: Arc::clone(manager), session: None }
+    }
+}
 
 impl UartSink for ScriptSink {
     fn send_uart(&self, bytes: Vec<u8>) -> bool {
-        let manager = Arc::clone(&self.0);
+        let manager = Arc::clone(&self.manager);
+        let session = self.session;
         tokio::spawn(async move {
-            if let Err(error) = manager.write_raw(bytes).await {
+            let outcome = match session {
+                Some(session_id) => manager.write_raw_for(session_id, bytes, false).await,
+                None => manager.write_raw(bytes).await,
+            };
+            if let Err(error) = outcome {
                 tracing::warn!("script uart send failed: {error}");
             }
         });
@@ -1084,7 +1291,7 @@ fn start_demo_vm(
     match LuaRuntime::start(
         bus,
         Some(session_id),
-        Some(Arc::new(ScriptSink(Arc::clone(manager)))),
+        Some(Arc::new(ScriptSink::for_session(manager, session_id))),
         rcom::core::lua::scripts::LLCOM_README_SAMPLE,
     ) {
         Ok(vm) => Some(vm),
@@ -1130,7 +1337,7 @@ fn spawn_panel_vm(
     generation: u64,
     ready: tokio::sync::mpsc::UnboundedSender<PanelVmReady>,
 ) {
-    let sink = Arc::new(ScriptSink(Arc::clone(manager))) as Arc<dyn UartSink>;
+    let sink = Arc::new(ScriptSink::standalone(manager)) as Arc<dyn UartSink>;
     tokio::task::spawn_blocking(move || {
         let vm = LuaRuntime::create(bus, None, Some(sink));
         let Ok(reportable) = vm else {
@@ -1151,6 +1358,75 @@ fn spawn_panel_vm(
         let _ = reportable.run_script(&code);
     });
 }
+
+/// A freshly created session script VM on its way to the driver (ticket #35):
+/// adopted into the registry when its generation is still current and the
+/// session is alive, stopped otherwise.
+struct SessionVmReady {
+    session_id: u64,
+    generation: u64,
+    vm: mlua::Result<LuaRuntime>,
+}
+
+/// Boots a session script VM (the `RunSessionScript` command): same readiness
+/// pattern as the panel VM — `create` is bounded setup, the handle is reported
+/// *before* the script chunk runs so the session's death can stop it even
+/// while a script spins at load. The VM is session-bound: its sink writes to
+/// the session, its output rows route to the session's tab.
+fn spawn_session_vm(
+    manager: &Arc<PortManager>,
+    bus: EventBus,
+    session_id: u64,
+    code: String,
+    generation: u64,
+    ready: tokio::sync::mpsc::UnboundedSender<SessionVmReady>,
+) {
+    let sink = Arc::new(ScriptSink::for_session(manager, session_id)) as Arc<dyn UartSink>;
+    tokio::task::spawn_blocking(move || {
+        let vm = LuaRuntime::create(bus, Some(session_id), Some(sink));
+        let Ok(reportable) = vm else {
+            let _ = ready.send(SessionVmReady {
+                session_id,
+                generation,
+                vm: Err(mlua::Error::runtime("session script VM bootstrap failed")),
+            });
+            return;
+        };
+        let _ = ready.send(SessionVmReady {
+            session_id,
+            generation,
+            vm: Ok(reportable.clone()),
+        });
+        let _ = reportable.run_script(&code);
+    });
+}
+
+/// The `RCOM_AUTODEMO=cross` script (ticket #35): runs on session A, enumerates
+/// the session table and cross-sends through session B — the evidence is B's
+/// TX row (`cross-hello`), A's TX path stays silent.
+const CROSS_DEMO_SCRIPT: &str = r#"
+sys.taskInit(function()
+    sys.wait(300)
+    local list, err = rcom.ports.list()
+    if not list then
+        log.error("cross", err or "rcom.ports.list failed")
+        return
+    end
+    local target
+    for _, p in ipairs(list) do
+        log.info("ports", p.name .. " #" .. p.session_id .. " open=" .. tostring(p.open))
+        if p.name == "MOCK1" and p.open then
+            target = p.session_id
+        end
+    end
+    if not target then
+        log.error("cross", "no open MOCK1 session in the table")
+        return
+    end
+    local ok = rcom.ports.send(target, "cross-hello")
+    log.info("cross", "sent through session " .. target .. ": " .. tostring(ok))
+end)
+"#;
 
 /// A freshly started plot decoder on its way to the driver (the panel VM's
 /// readiness pattern): adopted when the generation is still current, stopped
@@ -1188,6 +1464,8 @@ async fn handle_command(
     panel_vm: &mut Option<LuaRuntime>,
     panel_generation: &mut u64,
     panel_ready: tokio::sync::mpsc::UnboundedSender<PanelVmReady>,
+    session_vm_generations: &mut HashMap<u64, u64>,
+    session_vm_ready: tokio::sync::mpsc::UnboundedSender<SessionVmReady>,
     plot_decoder: &mut Option<DecoderHost>,
     plot_generation: &mut u64,
     plot_ready: tokio::sync::mpsc::UnboundedSender<PlotDecoderReady>,
@@ -1208,11 +1486,10 @@ async fn handle_command(
         },
         Command::Open { name, baud } => {
             if let Err(error) = manager.open(&name, rcom::core::port::PortConfig::new(baud)).await {
-                let _ = ui.send(UiMsg::Row {
-                    session_id: None,
-                    text: rust_i18n::t!("open_failed", name = &name, error = &error).to_string(),
-                    direction: None,
-                });
+                // The failure surfaces per session: the pending tab clears its
+                // open state and carries the row (PortBusy `AlreadyOpen`, the
+                // device gone, a driver error — ticket #35).
+                let _ = ui.send(UiMsg::OpenFailed { port: name, error: error.to_string() });
             }
         }
         Command::CloseSession { session_id } => manager.close_session(session_id).await,
@@ -1237,6 +1514,15 @@ async fn handle_command(
             *panel_vm = None;
             *panel_generation += 1;
             spawn_panel_vm(manager, bus.clone(), code, *panel_generation, panel_ready);
+        }
+        Command::RunSessionScript { session_id, code } => {
+            // A fresh VM per run on this session (the per-session registry's
+            // only writer); the driver adopts the handle when the session is
+            // still alive and stops the previous one.
+            let generation = session_vm_generations.entry(session_id).or_insert(0);
+            *generation += 1;
+            let generation = *generation;
+            spawn_session_vm(manager, bus.clone(), session_id, code, generation, session_vm_ready);
         }
         Command::StopScript => {
             stop_panel_vm(panel_vm);

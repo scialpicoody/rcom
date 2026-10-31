@@ -74,6 +74,44 @@ impl QuickSendStore {
         dirs::config_dir().map(|dir| dir.join("rcom").join("quick-send.toml"))
     }
 
+    /// A port name as a file-safe stem (ticket #35): `/dev/tty.usbserial-1420`
+    /// → `_dev_tty.usbserial-1420`. Letters, digits, dot, dash, underscore
+    /// survive; everything else collapses to `_`.
+    pub fn sanitize_port_name(port: &str) -> String {
+        port.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+
+    /// The per-port override file (`<config>/rcom/quick-send-<stem>.toml`),
+    /// when the platform provides a config dir.
+    pub fn override_path(port: &str) -> Option<PathBuf> {
+        dirs::config_dir().map(|dir| {
+            dir.join("rcom")
+                .join(format!("quick-send-{}.toml", Self::sanitize_port_name(port)))
+        })
+    }
+
+    /// The tab's view of the quick-send set for `port` (ticket #35): the
+    /// port's own override file when one exists, else the shared default
+    /// profile. The first edit through a tab bound to `port` snapshots the
+    /// then-current set into the port's file — from then on the port owns its
+    /// set (the model: session-scoped overrides over a shared default).
+    pub fn load_for(port: &str) -> Self {
+        let path = Self::override_path(port);
+        if let Some(store) = Self::load_from(path.as_deref()) {
+            tracing::info!(port, entries = store.pages.iter().map(|page| page.entries.len()).sum::<usize>(), "quick-send port override loaded");
+            return store;
+        }
+        Self::load()
+    }
+
     /// Loads the persisted store, falling back to the seeded default when the file
     /// does not exist (or cannot be read/parsed — a broken profile must not keep
     /// the panel from coming up).
@@ -114,6 +152,17 @@ impl QuickSendStore {
     /// the in-memory panel stays authoritative).
     pub fn save(&self) {
         let _ = self.save_to(Self::default_path().as_deref());
+    }
+
+    /// Persists the store for a bound port's tab: the port's own override
+    /// file; `None` (an unbound tab) writes the shared default profile
+    /// (ticket #35's per-session quick-send sets).
+    pub fn save_for(&self, port: Option<&str>) {
+        let path = match port {
+            Some(port) => Self::override_path(port),
+            None => Self::default_path(),
+        };
+        let _ = self.save_to(path.as_deref());
     }
 
     /// The [`save`](Self::save) logic over an explicit path — testable.
@@ -191,5 +240,26 @@ mod tests {
         std::fs::remove_file(&path).ok();
         assert_eq!(loaded.pages.len(), PAGE_COUNT);
         assert_eq!(loaded.pages[0].entries, vec![QuickSendEntry::text("solo", "x")]);
+    }
+
+    /// The per-port override stem sanitizes OS port names (slashes, colons)
+    /// into file-safe text, and an override file round-trips (ticket #35's
+    /// per-session quick-send sets).
+    #[test]
+    fn per_port_override_names_sanitize_and_round_trip() {
+        let stem = QuickSendStore::sanitize_port_name("/dev/tty.usbserial-1420");
+        assert_eq!(stem, "_dev_tty.usbserial-1420");
+        assert!(!stem.contains('/'));
+        assert_eq!(QuickSendStore::sanitize_port_name("COM3"), "COM3");
+        assert_eq!(QuickSendStore::sanitize_port_name(r"\\.\COM10"), "__._COM10");
+
+        let mut store = QuickSendStore::default();
+        store.pages[0].entries = vec![QuickSendEntry::text("port-only", "x\r\n")];
+        let path = std::env::temp_dir().join(format!("rcom-quicksend-override-{stem}-{}.toml", std::process::id()));
+        store.save_to(Some(&path)).expect("save");
+        let loaded = QuickSendStore::load_from(Some(&path)).expect("load");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(loaded.pages[0].entries, vec![QuickSendEntry::text("port-only", "x\r\n")]);
+        assert_eq!(loaded.pages.len(), PAGE_COUNT);
     }
 }

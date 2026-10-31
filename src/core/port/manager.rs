@@ -2,13 +2,14 @@
 //! (through the [`factory::BackendFactory`] seam), hands out session ids, and
 //! keeps the session table.
 //!
-//! **Multi-session shape (ticket #37):** sessions live in a map keyed by
-//! session id; `open()` adds a session and — to keep the reconnect machine's
-//! semantics — closes and removes any *previous session of the same port*
-//! (a re-open replaces that port's dead session; two live sessions on one
-//! port cannot happen). The full real-port multi-session UX is ticket #35;
-//! this slice is what the session tabs need (several mock sessions at once,
-//! per-session writes and hooks, per-session playback controls).
+//! **Multi-session (tickets #37 + #35):** sessions live in a map keyed by
+//! session id and are fully independent — each with its own reader-forwarder
+//! task, write queue and pre-send hook. Opening a port whose *live* session
+//! already exists is refused with [`CoreError::AlreadyOpen`] (`PortBusy` per
+//! session — design-ui §3.6); opening over a *dead* session (unplug, error)
+//! replaces it — the reconnect machine's "reopen replaces the dead session"
+//! (the liveness probe is [`Session::is_alive`]). The reconnect machine tracks
+//! every armed/watching session independently ([`super::reconnect`]).
 //!
 //! Ticket #19's Lua pre-send hook stays: it is per session now
 //! ([`Self::set_hook_for`]), with the manager-wide slot (ticket #19's
@@ -18,6 +19,11 @@
 //! are already final (a script's `apiSendUartData` — llcom parity). The
 //! post-hook knowledge rides the TX event (`DataEvent.hooked`, design-ui
 //! §5.2 as amended by #30).
+//!
+//! **Cross-session scripting (ticket #35):** one [`PortManager`] per process
+//! is published with [`Self::init_global`]; the `rcom.ports` Lua table
+//! ([`crate::core::lua::ports_api`]) resolves it with [`Self::global`] to
+//! enumerate sessions and cross-send.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,6 +43,21 @@ use crate::core::lua::TxHook;
 /// The manager-wide hook slot's key (the legacy `set_hook` path; per-session
 /// hooks shadow it).
 const GLOBAL_HOOK: u64 = 0;
+
+/// The process-global manager (the `rcom.ports` seam's anchor): published by
+/// the app's engine startup (once per process); `init_global` is
+/// last-write-wins so tests can point it at their own instance.
+static GLOBAL_MANAGER: RwLock<Option<Arc<PortManager>>> = RwLock::new(None);
+
+/// One entry of the session enumeration the `rcom.ports.list()` API returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub session_id: u64,
+    pub port: String,
+    /// Whether the session is live ([`Session::is_alive`]) — a dead session
+    /// lingers until replaced or closed; sends to it fail.
+    pub open: bool,
+}
 
 pub struct PortManager {
     backend: Arc<dyn SerialBackend>,
@@ -68,6 +89,18 @@ impl PortManager {
         &self.bus
     }
 
+    /// Publishes this manager as the process-global instance (the
+    /// `rcom.ports` Lua API's anchor). The engine calls this once at startup;
+    /// last write wins (tests re-point it at their own instance).
+    pub fn init_global(self: &Arc<Self>) {
+        *GLOBAL_MANAGER.write().expect("global manager lock") = Some(Arc::clone(self));
+    }
+
+    /// The process-global manager, when one was published.
+    pub fn global() -> Option<Arc<PortManager>> {
+        GLOBAL_MANAGER.read().expect("global manager lock").clone()
+    }
+
     /// Lists the ports the backend offers right now. Blocking enumeration runs off
     /// the async context.
     pub async fn list_ports(&self) -> Result<Vec<PortInfo>> {
@@ -75,25 +108,35 @@ impl PortManager {
         tokio::task::spawn_blocking(move || backend.enumerate()).await?
     }
 
-    /// Opens `name` as a new session (multi-session shape: other ports'
-    /// sessions keep running; a previous session *of the same port* is closed
-    /// first — the reconnect machine's "reopen replaces the dead session").
-    /// Returns the new session id; the bus carries the matching
-    /// [`Event::Port`] transitions.
+    /// Opens `name` as a new session. Other ports' sessions keep running.
+    /// Same-port rule (ticket #35): when a **live** session of `name` exists
+    /// the open is refused with [`CoreError::AlreadyOpen`] — two sessions on
+    /// one port surface `PortBusy` per session, never global (design-ui
+    /// §3.6); a **dead** session (unplug/error) is replaced — the reconnect
+    /// machine's "reopen replaces the dead session". Returns the new session
+    /// id; the bus carries the matching [`Event::Port`] transitions.
     pub async fn open(&self, name: &str, config: PortConfig) -> Result<u64> {
-        // Close the same port's previous session, if any.
-        {
-            let mut sessions = self.sessions.lock().await;
-            let same_port: Vec<u64> = sessions
-                .iter()
-                .filter(|(_, session)| session.port == name)
-                .map(|(id, _)| *id)
-                .collect();
-            for id in same_port {
-                tracing::info!(session = id, port = name, "closing previous session");
-                if let Some(previous) = sessions.remove(&id) {
-                    previous.close().await;
+        // Same-port bookkeeping before the OS open: refuse over a live
+        // session, replace dead ones. The dead session's `close` may wait on
+        // its (already finished) forwarder — keep that out of the lock.
+        let dead: Vec<u64> = {
+            let sessions = self.sessions.lock().await;
+            for session in sessions.values() {
+                if session.port == name && session.is_alive() {
+                    tracing::info!(session = session.id, port = name, "open refused: port already open");
+                    return Err(CoreError::AlreadyOpen(name.to_string()));
                 }
+            }
+            sessions
+                .values()
+                .filter(|session| session.port == name)
+                .map(|session| session.id)
+                .collect()
+        };
+        for id in dead {
+            if let Some(previous) = self.sessions.lock().await.remove(&id) {
+                tracing::info!(session = id, port = name, "replacing dead session");
+                previous.close().await;
             }
         }
 
@@ -169,6 +212,33 @@ impl PortManager {
     /// The ids of the live sessions.
     pub async fn session_ids(&self) -> Vec<u64> {
         self.sessions.lock().await.keys().copied().collect()
+    }
+
+    /// Whether session `id` is still live (its forwarder has not ended).
+    pub async fn session_alive(&self, id: u64) -> bool {
+        self.sessions
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|session| session.is_alive())
+    }
+
+    /// A snapshot of the session table for **sync** callers (the `rcom.ports`
+    /// Lua API runs on arbitrary threads). `None` when the table lock is
+    /// contended by an async operation — the caller surfaces that instead of
+    /// blocking the Lua VM.
+    pub fn try_sessions_snapshot(&self) -> Option<Vec<SessionInfo>> {
+        let sessions = self.sessions.try_lock().ok()?;
+        let mut list: Vec<SessionInfo> = sessions
+            .values()
+            .map(|session| SessionInfo {
+                session_id: session.id,
+                port: session.port.clone(),
+                open: session.is_alive(),
+            })
+            .collect();
+        list.sort_by_key(|info| info.session_id);
+        Some(list)
     }
 
     /// The playback control of the session's port, when it is a mock port
@@ -332,70 +402,14 @@ impl PortManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::bus::{DataEvent, Direction, Payload};
+    use crate::core::bus::{Direction, Payload};
     use crate::core::port::factory::{BackendFactory, MockMode};
     use crate::core::port::mock::{MockTrigger, MOCK_PORT_NAME};
+    use crate::core::port::testing::EventTap;
 
     fn mock_manager(bus: EventBus) -> Arc<PortManager> {
         let backend = BackendFactory::with_mode(MockMode::All);
         Arc::new(PortManager::new(Arc::new(backend), bus))
-    }
-
-    /// Drains the bus in the background into a channel the test awaits.
-    struct EventTap {
-        rx: std::sync::mpsc::Receiver<Event>,
-        _keep: tokio::task::JoinHandle<()>,
-    }
-
-    impl EventTap {
-        fn new(bus: &EventBus) -> Self {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let mut events = bus.subscribe();
-            let keep = tokio::spawn(async move {
-                loop {
-                    match events.recv().await {
-                        Ok(event) => {
-                            if tx.send(event).is_err() {
-                                return;
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-                        Err(_) => continue,
-                    }
-                }
-            });
-            Self { rx, _keep: keep }
-        }
-
-        /// The next data event for `session_id` in `direction`.
-        fn next_data(&self, session_id: u64, direction: Direction, within: std::time::Duration) -> DataEvent {
-            let deadline = std::time::Instant::now() + within;
-            loop {
-                let left = deadline.saturating_duration_since(std::time::Instant::now());
-                match self.rx.recv_timeout(left) {
-                    Ok(Event::Data(data))
-                        if data.session_id == session_id && data.direction == direction =>
-                    {
-                        return data
-                    }
-                    Ok(_) => continue,
-                    Err(e) => panic!("no {direction:?} event for session {session_id} within {within:?}: {e}"),
-                }
-            }
-        }
-
-        /// The next log message.
-        fn next_log(&self, within: std::time::Duration) -> LogEvent {
-            let deadline = std::time::Instant::now() + within;
-            loop {
-                let left = deadline.saturating_duration_since(std::time::Instant::now());
-                match self.rx.recv_timeout(left) {
-                    Ok(Event::Log(log)) => return log,
-                    Ok(_) => continue,
-                    Err(e) => panic!("no log event within {within:?}: {e}"),
-                }
-            }
-        }
     }
 
     /// THE multi-session AC (AC7's core half): two mock sessions stream at
@@ -436,21 +450,79 @@ mod tests {
         assert!(manager.session_ids().await.is_empty());
     }
 
-    /// Re-opening the same port replaces that port's session (the reconnect
+    /// The PortBusy rule (ticket #35): opening a port whose **live** session
+    /// already exists is refused with `AlreadyOpen` — per session, the
+    /// existing session untouched — while other ports keep opening.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn opening_a_live_port_is_refused_and_leaves_the_session() {
+        let bus = EventBus::new();
+        let tap = EventTap::new(&bus);
+        let manager = mock_manager(bus.clone());
+
+        let a = manager.open("MOCK0", PortConfig::new(115_200)).await.expect("open");
+        let b = manager.open("MOCK1", PortConfig::new(115_200)).await.expect("open other port");
+        let busy = manager.open("MOCK0", PortConfig::new(115_200)).await.expect_err("already open");
+        assert!(matches!(busy, CoreError::AlreadyOpen(_)), "{busy}");
+        let ids = manager.session_ids().await;
+        assert_eq!(ids.len(), 2, "no session was added: {ids:?}");
+        assert!(ids.contains(&a) && ids.contains(&b));
+        // The refusing open disturbed nothing: the original session writes.
+        manager.write_for(a, b"still-mine".to_vec()).await.expect("write a");
+        let tx = tap.next_data(a, Direction::Tx, std::time::Duration::from_secs(5));
+        assert_eq!(tx.bytes.as_slice(), b"still-mine");
+
+        manager.close_all().await;
+    }
+
+    /// Re-opening a port over a **dead** session replaces it (the reconnect
     /// machine's reopen path) while other ports' sessions survive.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reopening_a_port_replaces_only_that_port_session() {
+    async fn reopening_a_port_replaces_only_that_port_dead_session() {
         let bus = EventBus::new();
         let _tap = EventTap::new(&bus);
         let manager = mock_manager(bus.clone());
 
         let a = manager.open("MOCK0", PortConfig::new(115_200)).await.expect("open");
-        let b = manager.open("MOCK1", PortConfig::new(115_200)).await.expect("open");
-        let a2 = manager.open("MOCK0", PortConfig::new(115_200)).await.expect("reopen");
-        assert_ne!(a, a2, "a fresh session id for the reopened port");
+        let dead = manager.open("MOCK3", PortConfig::new(115_200)).await.expect("open unplug");
+        // Kill the MOCK3 session (the unplug scenario's trigger, at 8× so the
+        // scripted "unplugged" window is short) and wait for the manager to
+        // see it dead (the forwarder ended).
+        let control = loop {
+            if let Some(control) = manager.mock_controls(dead) {
+                break control;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        control.set_speed(8.0);
+        control.trigger(MockTrigger::Unplug);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while manager.session_alive(dead).await {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the unplug trigger never killed the session"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // The backend refuses opens while the scripted unplug window is open;
+        // retry until it closes (8× ≈ 625 ms) — the machine does the same.
+        let replacement = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match manager.open("MOCK3", PortConfig::new(115_200)).await {
+                    Ok(id) => break id,
+                    Err(CoreError::NotOpen(_))
+                        if std::time::Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    Err(error) => panic!("reopen over dead failed: {error}"),
+                }
+            }
+        };
+        assert_ne!(replacement, dead, "a fresh session id for the reopened port");
         let ids = manager.session_ids().await;
-        assert_eq!(ids.len(), 2, "the reopened port replaced its session");
-        assert!(ids.contains(&a2) && ids.contains(&b), "{ids:?}");
+        assert_eq!(ids.len(), 2, "the dead session was replaced, others survive: {ids:?}");
+        assert!(ids.contains(&a) && ids.contains(&replacement), "{ids:?}");
 
         manager.close_all().await;
     }
