@@ -15,7 +15,9 @@
 //!   (the echo is the smoke-run evidence); `reconnect` injects an unplug/replug
 //!   cycle on the mock — session → WatchDesired → auto-reopen → data flows again
 //!   (contract §5d); `encoding` sends 你好 as GBK and drives the encoding switch;
-//!   `persist` runs entirely on the UI side (see the controller).
+//!   `persist` runs entirely on the UI side (see the controller). Beside these,
+//!   `RCOM_CODECDEMO=1` runs the codec toolbox's pure conversion/recovery proofs
+//!   (issue #22; see `core::codec::demo`).
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -173,6 +175,10 @@ fn start_engine() -> CoreHost {
                         Some(Arc::clone(&manager)),
                     ));
                 }
+                // ISSUE #22: the codec autodemo — pure conversion/recovery
+                // proofs over known mojibake (no port, no network); its
+                // evidence rows ride the bus's log events like the others.
+                rcom::core::codec::demo::run(&driver_bus);
                 driver(
                     manager,
                     driver_bus,

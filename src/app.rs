@@ -10,6 +10,7 @@ pub(crate) mod scriptstore;
 mod tools_net;
 mod tools_mqtt;
 mod tools_plot;
+mod tools_codec;
 
 use crate::main_window::MainWindow;
 use ferroui_base::{
