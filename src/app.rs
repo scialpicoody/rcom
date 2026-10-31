@@ -5,6 +5,7 @@ pub(crate) mod controller;
 mod host;
 pub(crate) mod i18n;
 pub(crate) mod logview;
+pub(crate) mod parity;
 pub(crate) mod plot_view;
 pub(crate) mod quicksend;
 pub(crate) mod scriptstore;
