@@ -88,7 +88,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    use crate::core::bus::{publish_data, Payload};
+    use crate::core::bus::{publish_rx, Payload};
     use crate::core::mqtt::{MqttDirection, MqttEvent, MqttQos};
     use crate::core::port::manager::PortManager;
     use crate::core::port::mock::{MockBackend, MOCK_PORT_NAME};
@@ -101,7 +101,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bridge_moves_bytes_both_directions_over_a_real_session() {
         let bus = EventBus::new();
-        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::new()), bus.clone()));
+        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::for_mode(crate::core::port::factory::MockMode::Single(crate::core::port::MockScenario::Echo))), bus.clone()));
         let session = manager
             .open(MOCK_PORT_NAME, crate::core::port::PortConfig::new(115_200))
             .await
@@ -137,7 +137,12 @@ mod tests {
                 Ok(Event::Data(data))
                     if data.session_id == session && data.direction == Direction::Rx =>
                 {
-                    break; // the greeting — the port's RX is settled now
+                    break; // RX is flowing — the port's side is settled now
+                }
+                Ok(Event::Log(log))
+                    if log.session_id == Some(session) =>
+                {
+                    break; // the mock's greeting note — the port's side is live
                 }
                 _ => {}
             }
@@ -159,8 +164,8 @@ mod tests {
 
         // Direction 1 (serial RX → MQTT): a device chunk of the bridged
         // session; a neighbour session's chunk must stay out.
-        publish_data(&bus, session, Direction::Rx, b"from-device".to_vec());
-        publish_data(&bus, session + 100, Direction::Rx, b"other-session".to_vec());
+        publish_rx(&bus, session, b"from-device".to_vec());
+        publish_rx(&bus, session + 100, b"other-session".to_vec());
 
         // Direction 2 (MQTT → serial TX): an MQTT RX of the bridged session; a
         // neighbour session's message and local TX publishes stay out.

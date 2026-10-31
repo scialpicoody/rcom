@@ -4,11 +4,14 @@
 pub(crate) mod controller;
 mod host;
 pub(crate) mod i18n;
+pub(crate) mod logview;
 pub(crate) mod plot_view;
 pub(crate) mod quicksend;
 pub(crate) mod scriptstore;
+pub(crate) mod session_vm;
 pub(crate) mod settings;
 pub(crate) mod theme;
+pub(crate) mod ui_patterns;
 mod tools_net;
 mod tools_mqtt;
 mod tools_monitor;

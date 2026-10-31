@@ -78,7 +78,7 @@ pub async fn run(bus: EventBus, hub: Arc<MqttHub>, manager: Option<Arc<PortManag
 
 /// One note row into the session log (the `##`/`!!` lines).
 fn note(bus: &EventBus, text: String, level: LogLevel) {
-    bus.publish(Event::Log(LogEvent { level, timestamp: chrono::Local::now(), message: text }));
+    bus.publish(Event::Log(LogEvent { level, timestamp: chrono::Local::now(), message: text, session_id: None }));
 }
 
 fn demo_config(port: u16, tls: bool) -> MqttConfig {

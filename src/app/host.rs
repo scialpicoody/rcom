@@ -2,8 +2,9 @@
 //! UI-agnostic; the app bridges").
 //!
 //! - The tokio runtime runs on a dedicated background thread; the core's driver task
-//!   executes UI commands (refresh/open/close/send) and renders every bus event into
-//!   a pre-formatted log row.
+//!   executes UI commands (refresh/open/close/send/mock-playback) and renders every
+//!   bus event into a pre-formatted log row tagged with its session (the session
+//!   tabs route by it — design-ui §3.6: filter by `session_id` everywhere).
 //! - Rows cross to the UI thread over a std channel; a [`ferroui_base::threading::DispatcherTimer`]
 //!   on the UI thread drains it (the pinned FerroUI object handles are not `Send`, so
 //!   the timer poll is the sanctioned hand-off — verified against the 0.4.0-preview.1
@@ -11,13 +12,18 @@
 //! - The engine's always-on services start beside the driver: the log store (ring
 //!   buffer + auto-save file sink), the hotplug poller (1 s) and the reconnect state
 //!   machine (docs/design.md, "Serial layer").
+//! - **The mock seam (design-ui §5.7):** the engine's backend is the core's
+//!   [`BackendFactory`]; this file only *selects the mode* — `RCOM_MOCK` when set,
+//!   else the legacy demo vars pin their port (`RCOM_AUTODEMO=reconnect` ⇒ the
+//!   unplug scenario, the other mock-driven demos ⇒ the echo scenario), else the
+//!   core's profile default. Zero `RCOM_MOCK` parsing below beyond that one
+//!   selection; the UI never references it (AC9).
 //! - `RCOM_AUTODEMO` drives a scenario headlessly: `1` opens MOCK0 and sends `ping`
-//!   (the echo is the smoke-run evidence); `reconnect` injects an unplug/replug
-//!   cycle on the mock — session → WatchDesired → auto-reopen → data flows again
-//!   (contract §5d); `encoding` sends 你好 as GBK and drives the encoding switch;
-//!   `persist` runs entirely on the UI side (see the controller). Beside these,
-//!   `RCOM_CODECDEMO=1` runs the codec toolbox's pure conversion/recovery proofs
-//!   (issue #22; see `core::codec::demo`).
+//!   (the echo is the smoke-run evidence); `reconnect` drives the unplug scenario's
+//!   MockControl trigger through the new seam; `encoding` sends 你好 as GBK and
+//!   drives the encoding switch; `persist` runs entirely on the UI side (see the
+//!   controller). Beside these, `RCOM_CODECDEMO=1` runs the codec toolbox's pure
+//!   conversion/recovery proofs (issue #22; see `core::codec::demo`).
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -32,46 +38,88 @@ use rcom::core::codec::{hex_spaced, lossy_utf8, TextEncoding};
 use rcom::core::logstore::{default_log_dir, LogStore};
 use rcom::core::lua::{LuaRuntime, UartSink};
 use rcom::core::plot::{demo, DecoderHost};
+use rcom::core::port::factory::{mock_mode_default_for_profile, mock_mode_from_env, BackendFactory, MockMode};
 use rcom::core::port::manager::PortManager;
-use rcom::core::port::mock::{MockBackend, MockPlug, MOCK_PORT_NAME};
+use rcom::core::port::mock::{MockScenario, MockTrigger, MOCK_PORT_NAME};
 use rcom::core::port::reconnect;
-use rcom::core::port::serial::SerialPortBackend;
-use rcom::core::port::{hotplug, OpenPort, PortConfig, PortInfo, SerialBackend};
-use rcom::core::{EventBus, Result};
+use rcom::core::port::{MockControl, PortInfo};
+use rcom::core::EventBus;
 
 /// A command from the UI thread to the core driver.
 #[derive(Debug)]
 pub enum Command {
     RefreshPorts,
+    /// Opens `name` as a new session (the multi-session manager adds it; the
+    /// tab that sent the command adopts the session id from the Open event).
     Open { name: String, baud: u32 },
-    Close,
-    /// Text from the send box, already encoded to wire bytes by the UI (the
-    /// selector's encoding applies there, so the core stays encoding-agnostic).
-    SendBytes(Vec<u8>),
+    /// Closes the session (the tab's close / the Open-Close button).
+    CloseSession { session_id: u64 },
+    /// Closes every session (the quit guard's "Close all").
+    CloseAll,
+    /// Text from the send bar / quick-send, already encoded to wire bytes by
+    /// the UI (the selector's encoding applies there, so the core stays
+    /// encoding-agnostic). `session_id: None` = the legacy current-session
+    /// path (the demo harness).
+    SendBytes { session_id: Option<u64>, bytes: Vec<u8> },
     /// The script panel's Run: (re)boots the standalone script VM with this code
     /// (ticket #19). Output flows back as `~~` log rows.
     RunScript { code: String },
     /// The script panel's Stop: stops the standalone VM (instruction-count hook
     /// unwinds even a hard loop).
     StopScript,
-    /// Installs or clears the session's Lua pre-send hook (`None` = disabled).
-    SetHook(Option<String>),
+    /// Installs or clears the pre-send hook (`None` = disabled). With a
+    /// session id: that session's hook (the Script page's path); without: the
+    /// manager-wide slot (the demo harness).
+    SetHook { session_id: Option<u64>, script: Option<String> },
     /// The plot page's decoder Start (issue #24): boots a decoder VM with this
     /// script on the core runtime (a previous one is stopped first). Output
     /// flows back as [`UiMsg::Plot`] lifecycle events.
     PlotDecoderStart { name: String, code: String },
     /// The plot page's decoder Stop.
     PlotDecoderStop,
+    /// A mock-drawer action (design-ui §6.1) against session `id`'s playback
+    /// controls. Resolved core-side: a no-op when the session is not a mock.
+    MockAction { session_id: u64, action: MockAction },
+}
+
+/// The mock drawer's vocabulary (design-ui §6.1 `MockControl`), app-side so
+/// the UI types no core mock internals beyond the handle's API.
+#[derive(Debug, Clone)]
+pub enum MockAction {
+    Pause(bool),
+    Speed(f64),
+    Step,
+    InjectRx(Vec<u8>),
+    Trigger(MockTrigger),
+    Restart,
+}
+
+impl MockAction {
+    /// Applies itself to a resolved [`MockControl`].
+    fn apply(self, control: &MockControl) {
+        match self {
+            MockAction::Pause(on) => control.pause(on),
+            MockAction::Speed(speed) => control.set_speed(speed),
+            MockAction::Step => control.step(),
+            MockAction::InjectRx(bytes) => control.inject_rx(bytes),
+            MockAction::Trigger(trigger) => control.trigger(trigger),
+            MockAction::Restart => control.restart(),
+        }
+    }
 }
 
 /// One data chunk for the UI's log model: the raw bytes stay authoritative so an
 /// encoding switch re-renders history (docs/ui-drafts/05-contract.md §1.3).
+/// `session_id` routes the row to its tab; `hooked` renders the ` ⌁hook`
+/// marker on post-hook TX rows (design-ui §3.3/§5.2).
 #[derive(Debug, Clone)]
 pub struct DataRowMsg {
+    pub session_id: u64,
     pub direction: Direction,
     /// Pre-formatted local timestamp (`%H:%M:%S%.3f`).
     pub stamp: String,
     pub bytes: Vec<u8>,
+    pub hooked: bool,
 }
 
 /// A message from the core driver to the UI thread.
@@ -79,30 +127,31 @@ pub struct DataRowMsg {
 pub enum UiMsg {
     /// A fresh port listing.
     Ports(Vec<PortInfo>),
-    /// A session's port state (drives the Open/Close button).
-    PortState(PortState),
-    /// A pre-formatted log row (port state lines, diagnostics). `direction` tags
-    /// the data a row shows (`None` for status/diagnostic lines) — the hide-sent
-    /// filter works on this, view-side only; data chunks travel as [`UiMsg::Data`].
-    Row {
-        text: String,
-        direction: Option<Direction>,
-    },
-    /// A data chunk; the UI renders it with the current encoding.
+    /// A session's port lifecycle (drives the tab's chip/banner; `row` is the
+    /// formatted note row for the session's log).
+    PortState { session_id: u64, port: String, state: PortState, detail: Option<String>, row: String },
+    /// A pre-formatted log row (port notes, diagnostics, tool echoes).
+    /// `session_id: Some` routes to that session's tab, `None` to the active
+    /// tab (process-global rows: tool stories, standalone script VM output).
+    /// `direction` tags the data a row shows (`None` for status/diagnostic
+    /// lines) — the hide-sent filter works on this, view-side only; data
+    /// chunks travel as [`UiMsg::Data`].
+    Row { session_id: Option<u64>, text: String, direction: Option<Direction> },
+    /// A data chunk; the UI renders it with the session's current encoding.
     Data(DataRowMsg),
     /// Autodemo drives the encoding switch (the same code path as the selector).
     SetEncoding(TextEncoding),
     /// A net-tools event (issue #20); the tools page consumes it and the row
-    /// text also lands in the main log view.
+    /// text also lands in the active tab's log view.
     Net(rcom::core::nettools::NetEvent),
     /// An MQTT-tool event (issue #21); the tools page consumes it and the row
-    /// text also lands in the main log view.
+    /// text also lands in the active tab's log view.
     Mqtt(rcom::core::mqtt::MqttEvent),
     /// A plot-pipeline event (issue #24); the plot page consumes it and the
-    /// row also lands in the main log view.
+    /// row also lands in the active tab's log view.
     Plot(PlotEvent),
     /// A serial-monitor event (issue #23); the monitor page consumes it and
-    /// the row also lands in the main log view.
+    /// the row also lands in the active tab's log view.
     Monitor(rcom::core::monitor::MonitorEvent),
 }
 
@@ -122,11 +171,32 @@ pub fn core_host() -> &'static CoreHost {
     HOST.get_or_init(start_engine)
 }
 
+/// The backend-factory mode the engine starts with: `RCOM_MOCK` when set; else
+/// the legacy demo vars pin their port (the demo evidence paths must work in
+/// every build profile); else the core's profile default. The selection is
+/// the *only* mock-env reading outside the core's factory (AC9: none of it in
+/// the UI layer — this is the driver's startup, the seam's selection site).
+fn selected_mock_mode() -> MockMode {
+    if let Some(mode) = mock_mode_from_env() {
+        return mode;
+    }
+    match AutodemoMode::from_env() {
+        AutodemoMode::Reconnect => MockMode::Single(MockScenario::Unplug),
+        AutodemoMode::Off => {
+            if luademo_enabled() || plotdemo_enabled() {
+                MockMode::Single(MockScenario::Echo)
+            } else {
+                mock_mode_default_for_profile()
+            }
+        }
+        _ => MockMode::Single(MockScenario::Echo),
+    }
+}
+
 fn start_engine() -> CoreHost {
     let bus = EventBus::new();
-    let composite = CompositeBackend::new();
-    let mock_plug = composite.mock_plug();
-    let backend: Arc<dyn SerialBackend> = Arc::new(composite);
+    let factory = BackendFactory::with_mode(selected_mock_mode());
+    let backend: Arc<dyn rcom::core::port::SerialBackend> = Arc::new(factory);
     let manager = Arc::new(PortManager::new(Arc::clone(&backend), bus.clone()));
     let (commands_tx, commands_rx) = mpsc::unbounded_channel::<Command>();
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiMsg>();
@@ -153,7 +223,7 @@ fn start_engine() -> CoreHost {
                     .map(|settings| settings.resolved_log_dir())
                     .unwrap_or_else(default_log_dir);
                 let logstore = LogStore::start(log_dir, &driver_bus);
-                hotplug::spawn(Arc::clone(&backend), driver_bus.clone());
+                rcom::core::port::hotplug::spawn(Arc::clone(&backend), driver_bus.clone());
                 reconnect::spawn(Arc::clone(&manager), driver_bus.clone());
                 // ISSUE #20: the process-global net hub (channels + bridge) and,
                 // when requested, the net autodemo beside the driver.
@@ -210,7 +280,6 @@ fn start_engine() -> CoreHost {
                     demo_commands,
                     ui_tx,
                     logstore,
-                    mock_plug,
                 )
                 .await;
             });
@@ -265,24 +334,32 @@ async fn driver(
     commands_tx: mpsc::UnboundedSender<Command>,
     ui: std::sync::mpsc::Sender<UiMsg>,
     logstore: Arc<LogStore>,
-    mock_plug: MockPlug,
 ) {
     // The demo paths: `RCOM_AUTODEMO=1` opens MOCK0 and sends `ping` (the mock
-    // echoes it back as RX); `RCOM_AUTODEMO=reconnect` adds an injected
-    // unplug/replug cycle the reconnect machine survives; `RCOM_AUTODEMO=encoding`
-    // sends 你好 as GBK bytes and then drives the encoding switch — the re-render
-    // proof of ticket #17. (`=persist` is handled entirely on the UI side, see the
-    // controller.) `RCOM_AUTODEMO=hook` installs the `fromHex` pre-send hook and
-    // sends the hex *text* `414243` — the wire must see `41 42 43`; `=panel` runs
-    // the script-panel Run/Stop path headlessly. `RCOM_LUADEMO=1` implies the
-    // basic path — the script VM boots on the MOCK0 open and feeds on its first
-    // RX chunk (ticket #18).
+    // echoes it back as RX); `RCOM_AUTODEMO=reconnect` opens the unplug-scenario
+    // MOCK0 and drives its MockControl trigger — session → WatchDesired →
+    // auto-reopen → data flows again (contract §5d; the new seam's path).
+    // `RCOM_AUTODEMO=encoding` sends 你好 as GBK bytes and then drives the
+    // encoding switch — the re-render proof of ticket #17. (`=persist` is
+    // handled entirely on the UI side, see the controller.) `RCOM_AUTODEMO=hook`
+    // installs the `fromHex` pre-send hook and sends the hex *text* `414243` —
+    // the wire must see `41 42 43`; `=panel` runs the script-panel Run/Stop
+    // path headlessly. `RCOM_LUADEMO=1` implies the basic path — the script VM
+    // boots on the MOCK0 open and feeds on its first RX chunk (ticket #18).
     let mut awaiting_echo: Option<Vec<u8>> = None;
     // The reconnect demo: set once the machine reports Reopened, so the next RX
     // `ping` proves data flows across the unplug/replug.
     let mut reconnected = false;
     let luademo = luademo_enabled();
     let plotdemo = plotdemo_enabled();
+    // The reconnect demo's trigger task learns its session id from the Open
+    // event (published by the driver's Port arm below).
+    let (demo_id_tx, demo_id_rx) = mpsc::unbounded_channel::<u64>();
+    let demo_id_tx = if AutodemoMode::from_env() == AutodemoMode::Reconnect {
+        Some(demo_id_tx)
+    } else {
+        None
+    };
     let requested = AutodemoMode::from_env();
     let mode = if requested == AutodemoMode::Off && (luademo || plotdemo) {
         AutodemoMode::Basic // both demos run against the MOCK0 open
@@ -295,7 +372,7 @@ async fn driver(
     if plotdemo {
         tracing::info!(
             "RCOM_PLOTDEMO: driving the plot demo (bundled framed-protocol decoder, \
-             generator on MOCK0; mode {:?})",
+             generator on MOCK0 unless the mock already feeds frames; mode {:?})",
             demo::PlotDemoMode::from_env()
         );
     }
@@ -310,30 +387,43 @@ async fn driver(
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 let _ = demo.send(Command::Open { name: MOCK_PORT_NAME.into(), baud: 115_200 });
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                let _ = demo.send(Command::SendBytes(b"ping".to_vec()));
+                let _ = demo.send(Command::SendBytes { session_id: None, bytes: b"ping".to_vec() });
             });
             awaiting_echo = Some(b"ping".to_vec());
         }
         AutodemoMode::Reconnect => {
-            tracing::info!("RCOM_AUTODEMO=reconnect: driving the unplug/replug demo path");
+            tracing::info!(
+                "RCOM_AUTODEMO=reconnect: driving the unplug/replug demo path \
+                 (unplug scenario MOCK0, MockControl triggers)"
+            );
             let demo = commands_tx.clone();
-            let plug = mock_plug.clone();
             let store = Arc::clone(&logstore);
+            let mut id_rx = demo_id_rx;
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 let _ = demo.send(Command::Open { name: MOCK_PORT_NAME.into(), baud: 115_200 });
+                let session_id = match id_rx.recv().await {
+                    Some(session_id) => session_id,
+                    None => return,
+                };
                 tokio::time::sleep(Duration::from_millis(600)).await;
-                let _ = demo.send(Command::SendBytes(b"hello".to_vec()));
+                let _ = demo.send(Command::SendBytes {
+                    session_id: Some(session_id),
+                    bytes: b"hello".to_vec(),
+                });
                 tokio::time::sleep(Duration::from_millis(600)).await;
-                tracing::info!("AUTODEMO: injecting MOCK0 unplug");
-                plug.unplug();
-                tokio::time::sleep(Duration::from_millis(2000)).await;
-                tracing::info!("AUTODEMO: injecting MOCK0 replug");
-                plug.replug();
-                // The hotplug poller announces the return within its 1 s
-                // cadence; the machine re-opens; give it both windows.
-                tokio::time::sleep(Duration::from_millis(1400)).await;
-                let _ = demo.send(Command::SendBytes(b"ping".to_vec()));
+                tracing::info!("AUTODEMO: triggering MOCK0 unplug (MockControl)");
+                let _ = demo.send(Command::MockAction {
+                    session_id,
+                    action: MockAction::Trigger(MockTrigger::Unplug),
+                });
+                // The scripted reappear (5 s / speed) opens the reconnect
+                // window; give the machine its poll cadence, then ping.
+                tokio::time::sleep(Duration::from_millis(6500)).await;
+                let _ = demo.send(Command::SendBytes {
+                    session_id: Some(session_id),
+                    bytes: b"ping".to_vec(),
+                });
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 match store.file_path().await {
                     Some(path) => {
@@ -354,12 +444,13 @@ async fn driver(
                 let _ = demo.send(Command::Open { name: MOCK_PORT_NAME.into(), baud: 115_200 });
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 // The llcom README hook, through the real UI command path.
-                let _ = demo.send(Command::SetHook(Some(
-                    rcom::core::lua::scripts::SEND_CONVERT_HEX.into(),
-                )));
+                let _ = demo.send(Command::SetHook {
+                    session_id: None,
+                    script: Some(rcom::core::lua::scripts::SEND_CONVERT_HEX.into()),
+                });
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 // Hex *text* in — the hook must convert before the writer.
-                let _ = demo.send(Command::SendBytes(b"414243".to_vec()));
+                let _ = demo.send(Command::SendBytes { session_id: None, bytes: b"414243".to_vec() });
             });
             // The echo comes back as the *converted* bytes "ABC".
             awaiting_echo = Some(b"ABC".to_vec());
@@ -393,7 +484,7 @@ async fn driver(
                 let _ = demo.send(Command::Open { name: MOCK_PORT_NAME.into(), baud: 115_200 });
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 // TX in GBK while the display still decodes UTF-8: garbled rows.
-                let _ = demo.send(Command::SendBytes(payload));
+                let _ = demo.send(Command::SendBytes { session_id: None, bytes: payload });
                 // Then the switch: the UI re-renders the retained raw bytes.
                 tokio::time::sleep(Duration::from_millis(700)).await;
                 let _ = ui.send(UiMsg::SetEncoding(TextEncoding::Gbk));
@@ -468,6 +559,7 @@ async fn driver(
                             }
                             Err(error) => {
                                 let _ = ui.send(UiMsg::Row {
+                                    session_id: None,
                                     text: rust_i18n::t!("script_run_failed", error = &error).to_string(),
                                     direction: None,
                                 });
@@ -590,7 +682,7 @@ async fn driver(
                             if let Event::Port(port) = &event {
                                 if port.state == PortState::Open && port.port == MOCK_PORT_NAME {
                                     script_vm = start_demo_vm(&manager, bus.clone(), port.session_id, &ui);
-                                    
+
                                 }
                             }
                         }
@@ -608,9 +700,10 @@ async fn driver(
                         }
                     }
                     // Plot demo (issue #24): on the MOCK0 open, boot the bundled
-                    // framed-protocol decoder and start the frame generator — the
-                    // full pipeline (generator → mock echo → bus tap → decoder →
-                    // plot store → UI sampling) runs from here.
+                    // framed-protocol decoder. The frame *feed* comes from the
+                    // mock itself when the opened port is the framed scenario
+                    // (RCOM_MOCK=framed via the new seam); otherwise the demo
+                    // generator writes frames through the real TX path as before.
                     if plotdemo && !plotdemo_started {
                         if let Event::Port(port) = &event {
                             if port.state == PortState::Open && port.port == MOCK_PORT_NAME {
@@ -623,11 +716,21 @@ async fn driver(
                                     plot_generation,
                                     plot_ready_tx.clone(),
                                 );
-                                let config = match demo::PlotDemoMode::from_env() {
-                                    demo::PlotDemoMode::Fast => demo::DemoConfig::fast(),
-                                    _ => demo::DemoConfig::basic(),
-                                };
-                                demo::spawn_generator(Arc::clone(&manager), config);
+                                let framed_mock = manager
+                                    .mock_controls(port.session_id)
+                                    .is_some_and(|control| control.scenario() == MockScenario::Framed);
+                                if !framed_mock {
+                                    let config = match demo::PlotDemoMode::from_env() {
+                                        demo::PlotDemoMode::Fast => demo::DemoConfig::fast(),
+                                        _ => demo::DemoConfig::basic(),
+                                    };
+                                    demo::spawn_generator(Arc::clone(&manager), config);
+                                } else {
+                                    tracing::info!(
+                                        "PLOTDEMO: the framed mock feeds the decoder directly \
+                                         (no demo generator)"
+                                    );
+                                }
                             }
                         }
                     }
@@ -675,8 +778,24 @@ async fn driver(
                             }
                             _ => {}
                         }
-                        // The state reaches the button, the row the log view.
-                        if ui.send(UiMsg::PortState(port.state)).is_err() {
+                        // The reconnect demo's trigger task needs the session id.
+                        if let Some(demo_id_tx) = &demo_id_tx {
+                            if port.state == PortState::Open {
+                                let _ = demo_id_tx.send(port.session_id);
+                            }
+                        }
+                        // The state reaches the tab's chip and its note row.
+                        let row = format_port_row(port);
+                        if ui
+                            .send(UiMsg::PortState {
+                                session_id: port.session_id,
+                                port: port.port.clone(),
+                                state: port.state,
+                                detail: port.detail.clone(),
+                                row,
+                            })
+                            .is_err()
+                        {
                             break; // UI gone
                         }
                     }
@@ -685,9 +804,11 @@ async fn driver(
                             let row = format_data_row(data);
                             tracing::debug!(target: "rcom::rows", "{row}");
                             let message = UiMsg::Data(DataRowMsg {
+                                session_id: data.session_id,
                                 direction: data.direction,
                                 stamp: data.timestamp.format("%H:%M:%S%.3f").to_string(),
                                 bytes: data.bytes.as_slice().to_vec(),
+                                hooked: data.hooked,
                             });
                             if ui.send(message).is_err() {
                                 break; // UI gone
@@ -699,7 +820,7 @@ async fn driver(
                         Event::Net(net) => {
                             let row = super::tools_net::format_net_row(net);
                             tracing::debug!(target: "rcom::rows", "{row}");
-                            if ui.send(UiMsg::Row { text: row, direction: None }).is_err() {
+                            if ui.send(UiMsg::Row { session_id: None, text: row, direction: None }).is_err() {
                                 break; // UI gone
                             }
                             if ui.send(UiMsg::Net(net.clone())).is_err() {
@@ -711,7 +832,7 @@ async fn driver(
                         Event::Mqtt(mqtt) => {
                             let row = super::tools_mqtt::format_mqtt_row(mqtt);
                             tracing::debug!(target: "rcom::rows", "{row}");
-                            if ui.send(UiMsg::Row { text: row, direction: None }).is_err() {
+                            if ui.send(UiMsg::Row { session_id: None, text: row, direction: None }).is_err() {
                                 break; // UI gone
                             }
                             if ui.send(UiMsg::Mqtt(mqtt.clone())).is_err() {
@@ -723,7 +844,7 @@ async fn driver(
                         Event::Plot(plot) => {
                             let row = format_plot_row(plot);
                             tracing::debug!(target: "rcom::rows", "{row}");
-                            if ui.send(UiMsg::Row { text: row, direction: None }).is_err() {
+                            if ui.send(UiMsg::Row { session_id: None, text: row, direction: None }).is_err() {
                                 break; // UI gone
                             }
                             if ui.send(UiMsg::Plot(plot.clone())).is_err() {
@@ -736,18 +857,19 @@ async fn driver(
                         Event::Monitor(monitor) => {
                             let row = super::tools_monitor::format_monitor_row(monitor);
                             tracing::debug!(target: "rcom::rows", "{row}");
-                            if ui.send(UiMsg::Row { text: row, direction: None }).is_err() {
+                            if ui.send(UiMsg::Row { session_id: None, text: row, direction: None }).is_err() {
                                 break; // UI gone
                             }
                             if ui.send(UiMsg::Monitor(monitor.clone())).is_err() {
                                 break; // UI gone
                             }
                         }
-                        Event::Port(_) | Event::Log(_) | Event::ScriptOut(_) => {
-                            if let Some(row) = render_event(&event) {
+                        Event::Port(_) => {}
+                        Event::Log(_) | Event::ScriptOut(_) => {
+                            if let Some((session_id, row)) = render_event(&event) {
                                 tracing::debug!(target: "rcom::rows", "{row}");
                                 if ui
-                                    .send(UiMsg::Row { text: row, direction: None })
+                                    .send(UiMsg::Row { session_id, text: row, direction: None })
                                     .is_err()
                                 {
                                     break; // UI gone
@@ -758,6 +880,7 @@ async fn driver(
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                     let _ = ui.send(UiMsg::Row {
+                        session_id: None,
                         text: rust_i18n::t!("bus_lag", missed = missed).to_string(),
                         direction: None,
                     });
@@ -814,6 +937,7 @@ fn start_demo_vm(
         Ok(vm) => Some(vm),
         Err(error) => {
             let _ = ui.send(UiMsg::Row {
+                session_id: None,
                 text: format!("!! {}", rust_i18n::t!("lua_demo_failed", error = &error)),
                 direction: None,
             });
@@ -923,23 +1047,31 @@ async fn handle_command(
             }
             Err(error) => {
                 let _ = ui.send(UiMsg::Row {
+                    session_id: None,
                     text: rust_i18n::t!("port_list_failed", error = &error).to_string(),
                     direction: None,
                 });
             }
         },
         Command::Open { name, baud } => {
-            if let Err(error) = manager.open(&name, PortConfig::new(baud)).await {
+            if let Err(error) = manager.open(&name, rcom::core::port::PortConfig::new(baud)).await {
                 let _ = ui.send(UiMsg::Row {
+                    session_id: None,
                     text: rust_i18n::t!("open_failed", name = &name, error = &error).to_string(),
                     direction: None,
                 });
             }
         }
-        Command::Close => manager.close().await,
-        Command::SendBytes(bytes) => {
-            if let Err(error) = manager.write(bytes).await {
+        Command::CloseSession { session_id } => manager.close_session(session_id).await,
+        Command::CloseAll => manager.close_all().await,
+        Command::SendBytes { session_id, bytes } => {
+            let outcome = match session_id {
+                Some(session_id) => manager.write_for(session_id, bytes).await,
+                None => manager.write(bytes).await,
+            };
+            if let Err(error) = outcome {
                 let _ = ui.send(UiMsg::Row {
+                    session_id,
                     text: rust_i18n::t!("send_failed", error = &error).to_string(),
                     direction: None,
                 });
@@ -958,26 +1090,23 @@ async fn handle_command(
             *panel_vm = None;
             *panel_generation += 1; // an in-flight start arrives to be stopped
             let _ = ui.send(UiMsg::Row {
+                session_id: None,
                 text: rust_i18n::t!("script_stopped").to_string(),
                 direction: None,
             });
         }
-        Command::SetHook(script) => match script {
-            Some(code) => {
-                manager.set_hook(Some(rcom::core::lua::TxHook::new(code.clone())));
-                let _ = ui.send(UiMsg::Row {
-                    text: rust_i18n::t!("tx_hook_on", script = &code).to_string(),
-                    direction: None,
-                });
+        Command::SetHook { session_id, script } => {
+            let hook = script.clone().map(rcom::core::lua::TxHook::new);
+            match session_id {
+                Some(session_id) => manager.set_hook_for(session_id, hook),
+                None => manager.set_hook(hook),
             }
-            None => {
-                manager.set_hook(None);
-                let _ = ui.send(UiMsg::Row {
-                    text: rust_i18n::t!("tx_hook_off").to_string(),
-                    direction: None,
-                });
-            }
-        },
+            let text = match script {
+                Some(code) => rust_i18n::t!("tx_hook_on", script = &code).to_string(),
+                None => rust_i18n::t!("tx_hook_off").to_string(),
+            };
+            let _ = ui.send(UiMsg::Row { session_id, text, direction: None });
+        }
         Command::PlotDecoderStart { name, code } => {
             // A fresh VM per start: stop the old one first (a Stopped notice
             // only when there was one).
@@ -1002,19 +1131,24 @@ async fn handle_command(
                 }));
             }
         }
+        Command::MockAction { session_id, action } => match manager.mock_controls(session_id) {
+            Some(control) => action.apply(&control),
+            None => tracing::warn!(session = session_id, "mock action on a non-mock session"),
+        },
     }
 }
 
-/// Turns a non-data bus event into the row the log view shows (data chunks travel
-/// to the UI as raw [`DataRowMsg`]s and are rendered there, per encoding; net and
-/// MQTT events are rendered in the driver's event arm — they carry their own row
-/// shape and also go to the tools pages).
-pub fn render_event(event: &Event) -> Option<String> {
+/// Turns a non-data bus event into the `(session_id, row)` the log view shows
+/// (`None`-session rows land on the active tab; data chunks travel to the UI as
+/// raw [`DataRowMsg`]s and are rendered there, per encoding; net and MQTT events
+/// are rendered in the driver's event arm — they carry their own row shape and
+/// also go to the tools pages).
+pub fn render_event(event: &Event) -> Option<(Option<u64>, String)> {
     match event {
         Event::Data(_) => None,
-        Event::Port(port) => Some(format_port_row(port)),
-        Event::Log(log) => Some(format_log_row(log)),
-        Event::ScriptOut(out) => Some(format_script_row(out)),
+        Event::Port(_) => None, // rendered in the driver's Port arm (chip + row)
+        Event::Log(log) => Some((log.session_id, format_log_row(log))),
+        Event::ScriptOut(out) => Some((out.session_id, format_script_row(out))),
         Event::Net(_) => None,
         Event::Mqtt(_) => None,
         Event::Plot(_) => None,
@@ -1166,6 +1300,7 @@ mod tests {
             direction: Direction::Tx,
             timestamp: stamp(),
             bytes: Payload::from_vec("hi".as_bytes().to_vec()),
+            hooked: false,
         });
         assert_eq!(row, "03:04:05.123  TX  68 69  \"hi\"");
     }
@@ -1179,6 +1314,7 @@ mod tests {
             direction: Direction::Rx,
             timestamp: stamp(),
             bytes: Payload::from_vec(vec![0x68, 0xff, 0x22]),
+            hooked: false,
         });
         assert!(row.contains("68 ff 22"), "{row}");
         assert!(row.contains("h\u{fffd}'"), "{row}");
@@ -1192,6 +1328,7 @@ mod tests {
             direction: Direction::Rx,
             timestamp: stamp(),
             bytes: Payload::from_vec(vec![0x61; ROW_HEX_BYTES + 10]),
+            hooked: false,
         });
         assert!(row.contains("…(+10 bytes)"), "{row}");
     }
@@ -1270,6 +1407,7 @@ mod tests {
             level: LogLevel::Warn,
             timestamp: stamp(),
             message: "careful".into(),
+            session_id: None,
         });
         assert_eq!(log, "03:04:05.123  !!  careful");
 
@@ -1277,8 +1415,9 @@ mod tests {
             level: LogLevel::Info,
             timestamp: stamp(),
             message: "x".into(),
+            session_id: Some(3),
         }))
-        .is_some());
+        .is_some_and(|(session_id, _)| session_id == Some(3)));
     }
     /// Script output renders as its own row kind: prints verbatim (llcom's
     /// "[I]-[tag] message" shape survives), errors flagged — the AC's "script
@@ -1313,26 +1452,27 @@ mod tests {
 
     /// Data events do not render through `render_event` — they travel to the UI
     /// as raw [`DataRowMsg`]s (the encoding switch re-renders them there); port
-    /// events still render their state line.
+    /// events render in the driver's Port arm (chip + row).
     #[test]
-    fn render_event_skips_data_and_renders_port() {
+    fn render_event_skips_data_and_renders_log() {
         assert!(render_event(&Event::Data(DataEvent {
             session_id: 1,
             direction: Direction::Tx,
             timestamp: stamp(),
             bytes: Payload::from_vec(b"hi".to_vec()),
+            hooked: false,
         }))
         .is_none());
 
-        assert!(render_event(&Event::Port(PortEvent {
-            session_id: 1,
-            port: "COM3".into(),
-            state: PortState::Closed,
-            detail: None,
+        let (session_id, row) = render_event(&Event::Log(LogEvent {
+            level: LogLevel::Info,
             timestamp: stamp(),
-            baud: None,
+            message: "note".into(),
+            session_id: Some(2),
         }))
-        .is_some());
+        .expect("log renders");
+        assert_eq!(session_id, Some(2));
+        assert!(row.contains("note"), "{row}");
     }
 
     /// The plot lifecycle rows (issue #24): a `[plot]` tag, `==` for the
@@ -1377,6 +1517,24 @@ mod tests {
         assert_eq!(localize_port_detail(Some("Device not found")), "Device not found");
         assert_eq!(localize_port_detail(None), "unknown");
     }
+
+    /// The mock-drawer action vocabulary applies to a control (the AC9 seam:
+    /// the app-side type maps onto the core handle's API).
+    #[test]
+    fn mock_actions_apply_to_the_control() {
+        let factory = BackendFactory::with_mode(MockMode::Single(MockScenario::Echo));
+        let control = factory.mock_control(MOCK_PORT_NAME).expect("control");
+        MockAction::Speed(99.0).apply(&control);
+        assert_eq!(control.speed(), 8.0, "clamped to the documented window");
+        MockAction::Pause(true).apply(&control);
+        assert!(control.paused());
+        MockAction::Pause(false).apply(&control);
+        assert!(!control.paused());
+        MockAction::InjectRx(b"x".to_vec()).apply(&control);
+        MockAction::Step.apply(&control);
+        MockAction::Trigger(MockTrigger::CorruptFrame).apply(&control);
+        MockAction::Restart.apply(&control);
+    }
 }
 
 /// `RCOM_LUADEMO=1`: run llcom's README sample in a script VM against MOCK0 —
@@ -1386,52 +1544,9 @@ fn luademo_enabled() -> bool {
 }
 
 /// `RCOM_PLOTDEMO=1|fast`: drive the plot pipeline (issue #24) — the bundled
-/// framed-protocol decoder plus a frame generator on MOCK0. `fast` raises the
-/// rate to fill the 10k-point rings for the render-budget proof.
+/// framed-protocol decoder plus a frame feed on MOCK0 (the demo generator, or
+/// the framed scenario's own timeline when `RCOM_MOCK=framed`). `fast` raises
+/// the generator's rate to fill the 10k-point rings for the render-budget proof.
 fn plotdemo_enabled() -> bool {
     demo::PlotDemoMode::from_env() != demo::PlotDemoMode::Off
-}
-
-/// Both backends, behind one list: the real ports of the machine plus the mock's
-/// `MOCK0` (the demo seam). Opening `MOCK0` routes to the mock; anything else to
-/// the real driver.
-struct CompositeBackend {
-    real: SerialPortBackend,
-    mock: MockBackend,
-}
-
-impl CompositeBackend {
-    fn new() -> Self {
-        Self {
-            real: SerialPortBackend::new(),
-            mock: MockBackend::new(),
-        }
-    }
-
-    /// The unplug/replug control of the mock backend (the autodemo drives it).
-    fn mock_plug(&self) -> MockPlug {
-        self.mock.plug()
-    }
-}
-
-impl SerialBackend for CompositeBackend {
-    fn enumerate(&self) -> Result<Vec<PortInfo>> {
-        let mut ports = match self.real.enumerate() {
-            Ok(ports) => ports,
-            Err(error) => {
-                tracing::warn!("real port enumeration failed: {error}");
-                Vec::new()
-            }
-        };
-        ports.extend(self.mock.enumerate()?);
-        Ok(ports)
-    }
-
-    fn open(&self, name: &str, config: &PortConfig) -> Result<OpenPort> {
-        if name == MOCK_PORT_NAME {
-            self.mock.open(name, config)
-        } else {
-            self.real.open(name, config)
-        }
-    }
 }

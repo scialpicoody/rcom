@@ -90,7 +90,7 @@ impl MonitorPage {
             .unwrap_or_default();
         for info in self.ports.borrow().iter() {
             let name = match &info.description {
-                Some(description) if !info.is_mock => {
+                Some(description) if !info.is_mock() => {
                     format!("{}  ({description})", info.name)
                 }
                 _ => info.name.clone(),

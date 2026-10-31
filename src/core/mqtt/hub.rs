@@ -387,7 +387,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hub_session_lifecycle_over_the_mock_broker() {
         let bus = EventBus::new();
-        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::new()), bus.clone()));
+        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::for_mode(crate::core::port::factory::MockMode::Single(crate::core::port::MockScenario::Echo))), bus.clone()));
         let hub = Arc::new(MqttHub::new(bus.clone(), manager));
         let broker = MockBroker::spawn().await.expect("broker binds");
 
@@ -447,7 +447,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unreachable_broker_reports_one_error_and_keeps_retrying() {
         let bus = EventBus::new();
-        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::new()), bus.clone()));
+        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::for_mode(crate::core::port::factory::MockMode::Single(crate::core::port::MockScenario::Echo))), bus.clone()));
         let hub = Arc::new(MqttHub::new(bus.clone(), manager));
         // Port 1 on loopback: nothing listens there.
         let id = hub.start_session(config(1)).expect("hub must start the session");
@@ -481,7 +481,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tls_session_round_trips_against_the_tls_mock_broker() {
         let bus = EventBus::new();
-        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::new()), bus.clone()));
+        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::for_mode(crate::core::port::factory::MockMode::Single(crate::core::port::MockScenario::Echo))), bus.clone()));
         let hub = Arc::new(MqttHub::new(bus.clone(), manager));
         let broker = MockBroker::spawn_tls().await.expect("TLS broker binds");
 
@@ -519,7 +519,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hub_bridge_attaches_to_the_tracked_session() {
         let bus = EventBus::new();
-        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::new()), bus.clone()));
+        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::for_mode(crate::core::port::factory::MockMode::Single(crate::core::port::MockScenario::Echo))), bus.clone()));
         let hub = Arc::new(MqttHub::new(bus.clone(), Arc::clone(&manager)));
         let broker = MockBroker::spawn().await.expect("broker binds");
 
@@ -571,7 +571,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hub_bridge_moves_bytes_both_directions() {
         let bus = EventBus::new();
-        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::new()), bus.clone()));
+        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::for_mode(crate::core::port::factory::MockMode::Single(crate::core::port::MockScenario::Echo))), bus.clone()));
         let hub = Arc::new(MqttHub::new(bus.clone(), Arc::clone(&manager)));
         let broker = MockBroker::spawn().await.expect("broker binds");
         // The port session opens first, and a throwaway MQTT session before the
@@ -599,7 +599,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Direction 1: device bytes → serial RX → bridge → broker (demo/up).
-        crate::core::bus::publish_data(&bus, session, Direction::Rx, b"via-hub".to_vec());
+        crate::core::bus::publish_rx(&bus, session, b"via-hub".to_vec());
         assert!(
             broker
                 .wait_message("demo/up", b"via-hub", Duration::from_secs(5))

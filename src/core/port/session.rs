@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use tokio::task::JoinHandle;
 
+use super::mock::MockControl;
 use super::{OpenPort, PortConfig, PortWriter, ReadEvent};
-use crate::core::bus::{publish_data, Direction, Event, EventBus, PortEvent, PortState};
+use crate::core::bus::{publish_rx, Event, EventBus, LogEvent, LogLevel, PortEvent, PortState};
 use crate::core::error::Result;
 
 /// Upper bound for a graceful close: the reader thread answers within one read
@@ -24,6 +25,9 @@ pub struct Session {
     writer: PortWriter,
     cancel: Arc<AtomicBool>,
     forwarder: JoinHandle<()>,
+    /// The playback control of a mock port (`None` for real ports) — the
+    /// manager surfaces it as `mock_controls(session_id)` (design-ui §5.7).
+    mock_control: Option<MockControl>,
 }
 
 impl Session {
@@ -34,6 +38,7 @@ impl Session {
             mut events,
             writer,
             cancel,
+            control,
         } = opened;
         let session_port = port.clone();
         let forwarder = tokio::spawn(async move {
@@ -52,7 +57,13 @@ impl Session {
             };
             while let Some(event) = events.recv().await {
                 match event {
-                    ReadEvent::Data(bytes) => publish_data(&bus, id, Direction::Rx, bytes),
+                    ReadEvent::Data(bytes) => publish_rx(&bus, id, bytes),
+                    ReadEvent::Note(text) => bus.publish(Event::Log(LogEvent {
+                        level: LogLevel::Info,
+                        timestamp: chrono::Local::now(),
+                        message: text,
+                        session_id: Some(id),
+                    })),
                     ReadEvent::Error(detail) => {
                         report(PortState::Error, Some(detail));
                         return;
@@ -75,7 +86,13 @@ impl Session {
             writer,
             cancel,
             forwarder,
+            mock_control: control,
         }
+    }
+
+    /// The playback control of this session's port, when it is a mock port.
+    pub fn mock_control(&self) -> Option<MockControl> {
+        self.mock_control.clone()
     }
 
     /// Queues `bytes` for transmission and publishes the TX data event. The TX event

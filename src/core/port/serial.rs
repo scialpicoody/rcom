@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use super::{OpenPort, PortConfig, PortInfo, PortWriter, ReadEvent, SerialBackend};
+use super::{OpenPort, PortConfig, PortInfo, PortKind, PortWriter, ReadEvent, SerialBackend};
 use crate::core::error::{CoreError, Result};
 
 pub struct SerialPortBackend;
@@ -53,7 +53,7 @@ impl SerialBackend for SerialPortBackend {
                 vid,
                 pid,
                 description,
-                is_mock: false,
+                kind: PortKind::Real,
             });
         }
         Ok(ports)
@@ -87,6 +87,7 @@ impl SerialBackend for SerialPortBackend {
             events: event_rx,
             writer: PortWriter { tx: write_tx },
             cancel,
+            control: None,
         })
     }
 }

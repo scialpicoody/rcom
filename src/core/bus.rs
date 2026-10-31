@@ -54,6 +54,12 @@ pub struct DataEvent {
     pub direction: Direction,
     pub timestamp: DateTime<Local>,
     pub bytes: Payload,
+    /// TX only (design-ui §5.2 `LogEvent.hooked`, amended by #30): the
+    /// pre-send hook modified the payload — the bytes carried here are the
+    /// post-hook payload the wire actually saw. The log view renders the
+    /// ` ⌁hook` marker from this; the UI-side flag rides the data event
+    /// because the write path (and only it) knows about the rewrite.
+    pub hooked: bool,
 }
 
 /// The `session_id` of process-global port events — the hotplug poller's
@@ -107,12 +113,17 @@ pub enum LogLevel {
 }
 
 /// A diagnostics message of the engine itself (distinct from `tracing`, which is for
-/// developers; this is the session log a user sees).
+/// developers; this is the session log a user sees). `session_id` scopes the row
+/// to one session's log view (`None` = process-global); the mock scenarios'
+/// `Note` timeline items and the session forwarder's lifecycle notes ride it
+/// session-scoped (design-ui §3.6: a tab must never process another session's rows).
 #[derive(Debug, Clone)]
 pub struct LogEvent {
     pub level: LogLevel,
     pub timestamp: DateTime<Local>,
     pub message: String,
+    /// The owning session (`None` = process-global).
+    pub session_id: Option<u64>,
 }
 
 /// Output pushed out by a Lua VM (docs/design.md, "Lua layer"; ticket #18 owns the
@@ -228,13 +239,26 @@ impl Default for EventBus {
     }
 }
 
-/// Convenience: stamps and publishes a RX/TX chunk for `session_id`.
-pub fn publish_data(bus: &EventBus, session_id: u64, direction: Direction, bytes: Vec<u8>) {
+/// Publishes a TX chunk carrying the post-hook knowledge (`hooked` — the
+/// pre-send hook rewrote the payload, design-ui §5.2).
+pub fn publish_tx(bus: &EventBus, session_id: u64, bytes: Vec<u8>, hooked: bool) {
     bus.publish(Event::Data(DataEvent {
         session_id,
-        direction,
+        direction: Direction::Tx,
         timestamp: Local::now(),
         bytes: Payload::from_vec(bytes),
+        hooked,
+    }));
+}
+
+/// Publishes an RX chunk (the reader-forwarder's path).
+pub fn publish_rx(bus: &EventBus, session_id: u64, bytes: Vec<u8>) {
+    bus.publish(Event::Data(DataEvent {
+        session_id,
+        direction: Direction::Rx,
+        timestamp: Local::now(),
+        bytes: Payload::from_vec(bytes),
+        hooked: false,
     }));
 }
 
@@ -252,16 +276,18 @@ mod tests {
             level: LogLevel::Info,
             timestamp: Local::now(),
             message: "before".into(),
+            session_id: None,
         }));
 
         let mut rx = bus.subscribe();
 
-        publish_data(&bus, 1, Direction::Tx, vec![0x68, 0x69]);
-        publish_data(&bus, 1, Direction::Rx, vec![0x70]);
+        publish_tx(&bus, 1, vec![0x68, 0x69], false);
+        publish_rx(&bus, 1, vec![0x70]);
         bus.publish(Event::Log(LogEvent {
             level: LogLevel::Warn,
             timestamp: Local::now(),
             message: "after".into(),
+            session_id: None,
         }));
 
         let seen: Vec<String> = (0..3)

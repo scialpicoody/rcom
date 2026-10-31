@@ -224,7 +224,7 @@ impl SettingsPage {
         let items = self.port.items();
         items.clear();
         for info in ports {
-            let name = match (&info.description, info.is_mock) {
+            let name = match (&info.description, info.is_mock()) {
                 (Some(description), false) => format!("{}  ({description})", info.name),
                 _ => info.name.clone(),
             };

@@ -325,7 +325,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hub_channel_lifecycle() {
         let bus = EventBus::new();
-        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::new()), bus.clone()));
+        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::for_mode(crate::core::port::factory::MockMode::Single(crate::core::port::MockScenario::Echo))), bus.clone()));
         let hub = Arc::new(NetHub::new(bus.clone(), manager));
         let addr = channel::spawn_tcp_echo("127.0.0.1:0").await.unwrap();
 
@@ -372,7 +372,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hub_bridge_attaches_to_the_tracked_session() {
         let bus = EventBus::new();
-        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::new()), bus.clone()));
+        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::for_mode(crate::core::port::factory::MockMode::Single(crate::core::port::MockScenario::Echo))), bus.clone()));
         let hub = Arc::new(NetHub::new(bus.clone(), Arc::clone(&manager)));
         let addr = channel::spawn_tcp_echo("127.0.0.1:0").await.unwrap();
 
@@ -431,7 +431,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hub_bridge_forwards_serial_rx_to_the_channel() {
         let bus = EventBus::new();
-        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::new()), bus.clone()));
+        let manager = Arc::new(PortManager::new(Arc::new(MockBackend::for_mode(crate::core::port::factory::MockMode::Single(crate::core::port::MockScenario::Echo))), bus.clone()));
         let hub = Arc::new(NetHub::new(bus.clone(), Arc::clone(&manager)));
         let addr = channel::spawn_tcp_echo("127.0.0.1:0").await.unwrap();
         let id = hub
@@ -456,7 +456,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Device bytes on the session's bus → bridge → channel → TCP out.
-        crate::core::bus::publish_data(&bus, session, Direction::Rx, b"via-hub".to_vec());
+        crate::core::bus::publish_rx(&bus, session, b"via-hub".to_vec());
         let proof = wait_net(&mut events, id, |kind| matches!(
             kind,
             NetEventKind::Data { direction: NetDirection::Tx, bytes, .. } if bytes.as_slice() == b"via-hub"

@@ -80,7 +80,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    use crate::core::bus::{Payload, publish_data};
+    use crate::core::bus::{publish_rx, Payload};
     use crate::core::nettools::{NetDirection, NetEventKind, NetMode, NetProtocol};
     use crate::core::port::manager::PortManager;
     use crate::core::port::mock::{MockBackend, MOCK_PORT_NAME};
@@ -94,7 +94,7 @@ mod tests {
     async fn bridge_moves_bytes_both_directions_over_a_real_session() {
         let bus = EventBus::new();
         let manager = Arc::new(PortManager::new(
-            Arc::new(MockBackend::new()),
+            Arc::new(MockBackend::for_mode(crate::core::port::factory::MockMode::Single(crate::core::port::MockScenario::Echo))),
             bus.clone(),
         ));
         let session = manager.open(MOCK_PORT_NAME, crate::core::port::PortConfig::new(115_200))
@@ -121,8 +121,8 @@ mod tests {
 
         // Direction 1 (serial RX → net): publish a device chunk for the
         // bridged session; a neighbour session's chunk must stay out.
-        publish_data(&bus, session, Direction::Rx, b"from-device".to_vec());
-        publish_data(&bus, session + 100, Direction::Rx, b"other-session".to_vec());
+        publish_rx(&bus, session, b"from-device".to_vec());
+        publish_rx(&bus, session + 100, b"other-session".to_vec());
 
         // Direction 2 (net → serial TX): a net RX chunk of the bridged
         // channel; a neighbour channel's chunk must stay out.

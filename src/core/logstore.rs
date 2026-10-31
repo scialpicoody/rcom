@@ -397,6 +397,7 @@ mod tests {
             direction,
             timestamp: Local::now(),
             bytes: Payload::from_vec(bytes.to_vec()),
+            hooked: false,
         })
     }
 
