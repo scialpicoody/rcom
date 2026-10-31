@@ -12,6 +12,7 @@ pub(crate) mod session_vm;
 pub(crate) mod settings;
 pub(crate) mod theme;
 pub(crate) mod ui_patterns;
+mod tools_terminal;
 mod tools_net;
 mod tools_mqtt;
 mod tools_monitor;

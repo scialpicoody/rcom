@@ -278,6 +278,9 @@ impl MainController {
         this.apply_ui_strings();
         this.fill_static_selectors();
         MainController::setup_script_page(&this);
+        // ISSUE #34 (one insertion point): the terminal page of the bottom
+        // pane — keyboard direct-send through the existing SendBytes path.
+        super::tools_terminal::attach(element);
         // ISSUE #20 (one insertion point): the net tools page of the bottom pane.
         tools_net::attach(element);
         // ISSUE #21 (one insertion point): the MQTT tools page of the bottom pane.
@@ -1958,6 +1961,9 @@ pub(crate) fn apply_all_strings() {
         }
     });
     tools_net::apply_strings();
+    // ISSUE #34 (second splice point, same per-page pattern): the terminal
+    // page joins the live language switch.
+    super::tools_terminal::apply_strings();
     super::tools_mqtt::apply_strings();
     super::tools_plot::apply_strings();
     super::tools_codec::apply_strings();

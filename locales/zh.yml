@@ -66,6 +66,18 @@ port_watching: "%{name} — %{detail}"
 port_reopened: "%{name} — %{detail}（%{baud} 波特）"
 port_arrived: "%{name} 已接入"
 port_removed: "%{name} 已移除"
+# 终端页（issue #34）——键盘直发；页面是输入面（design-ui §4.3）：流量留在
+# 会话日志，页面视图是所捕获按键的本地回显。
+terminal_tab: "终端"
+terminal_newline: "换行"
+terminal_echo: "本地回显"
+terminal_status_closed: "打开串口以启动终端"
+terminal_status_ready: "就绪 — 点击捕获条后输入；回车发送 %{nl}"
+terminal_empty_caption: "打开串口以启动终端"
+terminal_empty_hint: "捕获原始按键，包括 Ctrl+字母"
+terminal_capture_hint: "终端 — 点击此处后输入，每个按键直达串口"
+terminal_capture_active: "捕获中…"
+terminal_mapping_note: "Ctrl+A–Z → 0x01–0x1A · Ctrl+@[]^_ 与 {|}~ → 字节 & 0x1F · 回车 → CR/LF/CRLF（选择器）· Tab → 0x09，Shift+Tab → ESC[Z · Esc → 0x1B · 退格 → 0x7F · 方向键/Home/End → VT CSI · Insert/Delete/PgUp/PgDn → ESC[n~ · F1–F4 → ESC O P–S · F5–F12 → ESC[n~ · Alt/Meta：不发送"
 # 网络工具页（issue #20）
 net_tools: "网络工具"
 net_cert: "接受任意证书"
