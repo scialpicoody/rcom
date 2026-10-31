@@ -270,7 +270,7 @@ fn start_housekeeping(hub: &Arc<NetHub>) {
                             PortState::Arrived | PortState::Removed => {}
                         },
                         Event::Data(_) | Event::Log(_) | Event::ScriptOut(_)
-                        | Event::Mqtt(_) | Event::Plot(_) => {}
+                        | Event::Mqtt(_) | Event::Plot(_) | Event::Monitor(_) => {}
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,

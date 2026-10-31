@@ -9,6 +9,11 @@
 //!   auto-save file sink.
 //! - [`lua`]: the Lua runtime (llcom `sys.*` compatibility) whose output reaches the
 //!   bus as script events.
+//! - [`monitor`]: the serial monitor (issue #23) — the unix pty-pair proxy
+//!   (virtual port ⇄ upstream relay; capture events with direction +
+//!   timestamps on [`bus::Event::Monitor`]; the Windows FFI path is skipped on
+//!   the license verdict recorded on the ticket) and the `RCOM_MONITORDEMO`
+//!   self-demo.
 //! - [`nettools`]: the network tools (issue #20) — TCP/UDP/TLS server+client
 //!   channels with IPv6, the net⇄serial bridge, the `rcom.net` script API and
 //!   the `RCOM_NETDEMO` self-demo; channel events reach the bus as
@@ -30,6 +35,7 @@ pub mod codec;
 pub mod error;
 pub mod logstore;
 pub mod lua;
+pub mod monitor;
 pub mod mqtt;
 pub mod nettools;
 pub mod plot;

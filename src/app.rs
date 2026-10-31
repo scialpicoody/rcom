@@ -9,6 +9,7 @@ mod quicksend;
 pub(crate) mod scriptstore;
 mod tools_net;
 mod tools_mqtt;
+mod tools_monitor;
 mod tools_plot;
 mod tools_codec;
 
