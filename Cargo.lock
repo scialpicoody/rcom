@@ -1765,6 +1765,7 @@ dependencies = [
  "ferroui-themes-winui",
  "ferroui-view",
  "mlua",
+ "nix",
  "rcgen",
  "rumqttc",
  "rust-i18n",

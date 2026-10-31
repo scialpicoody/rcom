@@ -84,5 +84,12 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem
 # toggle).
 rumqttc = { version = "0.25", default-features = false, features = ["use-rustls-no-provider"] }
 
+# ISSUE #23 — the serial monitor's pty-pair proxy (unix only): `openpty`, raw
+# termios and `poll` on the `nix` that is already in the tree (serialport's
+# dependency). At this 0.26 pin the pty module rides the `term` feature — the
+# only features this adds beyond serialport's selection are `poll` and `fs`.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.26", default-features = false, features = ["term", "poll", "fs"] }
+
 [build-dependencies]
 ferroui-build = { version = "=0.4.0-preview.1" }
