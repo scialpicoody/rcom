@@ -72,8 +72,8 @@ use ferroui_base::{
     FerroObjectImpl, Point, Rect, Ref, Size, StyledElement, StyledElementImpl, VisualImpl,
 };
 use ferroui_controls::{
-    Button, CheckBox, ComboBox, ContentControl, Control, ControlImpl, Grid, ListBox, StackPanel,
-    TabItem, TextBlock,
+    Border, Button, CheckBox, ComboBox, ContentControl, Control, ControlImpl, Grid, ListBox,
+    StackPanel, TabItem, TextBlock,
 };
 
 use rust_i18n::t;
@@ -384,7 +384,6 @@ struct TerminalPage {
     capture: Ref<TerminalCaptureView>,
     /// The session log view (the controller's `LogList`, resolved in the same
     /// name scope; used read-only by the demo's wire-echo proof).
-    log_view: Ref<ListBox>,
     /// The Open/Close button: its content ("Close" while the session counts
     /// as active) is the open-state signal this page reads.
     open_close: Ref<Button>,
@@ -478,7 +477,7 @@ impl TerminalPage {
         let Some(bytes) = map_key(stroke, self.newline_mode()) else {
             return false; // modifier-only / Alt-Meta / unmapped: not the terminal's key
         };
-        core_host().commands.send(Command::SendBytes(bytes.clone())).ok();
+        core_host().commands.send(Command::SendBytes { session_id: None, bytes: bytes.clone() }).ok();
         if self.echo.is_checked() == Some(true) {
             self.append_echo_row(&bytes);
         }
@@ -583,15 +582,14 @@ impl TerminalPage {
         }
     }
 
-    /// Scans the session log view's rendered rows for the RX echo needles
-    /// (the log rows are rendered from the actual bus `DataEvent`s, so the
-    /// scan is the wire proof; read-only — the log stays the controller's).
+    /// The session log's rows at the model level (the controller's active
+    /// session VM — the source the rendered rows come from), so the proof
+    /// reads what the shell shows without walking the row tree.
     fn find_missing_rows(&self, needles: &[String]) -> Vec<String> {
+        let rows = super::controller::active_session_row_texts();
+        tracing::debug!(target: "rcom::terminal_demo", "scan: {} model rows", rows.len());
         let mut missing: Vec<String> = needles.to_vec();
-        let count = self.log_view.item_count();
-        for index in 0..count {
-            let Some(value) = self.log_view.items().view().get_at(index as usize) else { continue };
-            let Some(row) = value.downcast_ref::<String>() else { continue };
+        for row in &rows {
             missing.retain(|needle| !row.contains(needle.as_str()));
             if missing.is_empty() {
                 break;
@@ -601,11 +599,12 @@ impl TerminalPage {
     }
 }
 
-/// The RX-row needle for one echo byte: the log row's shape is
-/// `{stamp}  {direction:>2}  {hex}  "{text}"` (the controller's
-/// `render_data_line`), so `  RX  70  ` pins the echo of `0x70` exactly.
+/// The RX-row needle for one echo byte: the #37 shell's log row is
+/// `[time][badge "RX"][hex][text]` cells collected by `find_missing_rows`
+/// as space-joined texts, so `RX 70` pins the echo of `0x70` (and a TX row's
+/// badge is "TX", so the send itself never matches).
 fn rx_needle(byte: u8) -> String {
-    format!("  RX  {byte:02x}  ")
+    format!("RX {byte:02x}")
 }
 
 ferroui_base::ferro_thread_local! {
@@ -643,7 +642,6 @@ pub fn attach(element: &Ref<StyledElement>) {
         empty_hint: NameScopeExtensions::get(element, "TerminalEmptyHint"),
         mapping_note: NameScopeExtensions::get(element, "TerminalMappingNote"),
         capture_host: NameScopeExtensions::get(element, "TerminalCaptureHost"),
-        log_view: NameScopeExtensions::get(element, "LogList"),
         open_close: NameScopeExtensions::get(element, "OpenCloseButton"),
         capture,
         open: Cell::new(false),
@@ -912,14 +910,15 @@ mod tests {
         assert_eq!(format_echo_row(&[0x70, 0x0d]), "→ 70 0d  p\\r");
     }
 
-    /// The demo's RX needle pins the echo row shape (`stamp  RX  hex  "…"`).
+    /// The demo's RX needle pins the echo row shape (badge `RX` + hex cells,
+    /// space-joined by the scan).
     #[test]
     fn rx_needles_match_the_log_row_shape() {
-        let row = "03:04:05.123  RX  70  \"p\"";
+        let row = "RX 70 p";
         assert!(row.contains(&rx_needle(0x70)));
         assert!(!row.contains(&rx_needle(0x69)));
         // A TX row (the send itself) is not mistaken for the echo.
-        let tx_row = "03:04:05.123  TX  70  \"p\"";
+        let tx_row = "TX 70 p";
         assert!(!tx_row.contains(&rx_needle(0x70)));
     }
 }

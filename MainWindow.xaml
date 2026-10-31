@@ -440,6 +440,69 @@
     </Grid>
   </TabItem>
 
+      <!-- The codec toolbox page (issue #22): encoding conversion (A→B with
+           the charset pickers), hex/base64/percent codecs, and the garbled-text
+           recovery (its candidates land in CodecCandidates, click applies).
+           The XAML carries no visible strings — src/app/tools_codec.rs sets
+           every label from the i18n dictionaries and wires the controls by
+           these names (multiline + monospaced font are set in code, like the
+           script editor). -->
+      <TabItem x:Name="CodecTab">
+        <Grid RowDefinitions="Auto,Auto,*,Auto,*,Auto" Margin="4">
+          <!-- Operation row: the codec selector, the A→B charsets with the
+               direction swap between them, the input-is-hex toggle, run. -->
+          <StackPanel Grid.Row="0"
+                      Orientation="Horizontal"
+                      Spacing="6">
+            <ComboBox x:Name="CodecOpSelector"
+                      MinWidth="140" />
+            <ComboBox x:Name="CodecFromSelector"
+                      MinWidth="92" />
+            <Button x:Name="CodecSwapButton"
+                    MinWidth="36" />
+            <ComboBox x:Name="CodecToSelector"
+                      MinWidth="92" />
+            <CheckBox x:Name="CodecHexCheck"
+                      VerticalAlignment="Center" />
+            <Button x:Name="CodecRunButton"
+                    MinWidth="84" />
+          </StackPanel>
+
+          <StackPanel Grid.Row="1"
+                      Orientation="Horizontal"
+                      Spacing="12"
+                      Margin="0,4,0,2">
+            <TextBlock x:Name="CodecInputCaption"
+                       FontSize="12" />
+            <TextBlock x:Name="CodecStatus"
+                       FontSize="12"
+                       VerticalAlignment="Center" />
+          </StackPanel>
+
+          <TextBox x:Name="CodecInputBox"
+                   Grid.Row="2"
+                   FontSize="13" />
+
+          <TextBlock x:Name="CodecOutputCaption"
+                     Grid.Row="3"
+                     FontSize="12"
+                     Margin="0,4,0,2" />
+
+          <!-- The output stays read-only and selectable (Ctrl+C copies). -->
+          <TextBox x:Name="CodecOutputBox"
+                   Grid.Row="4"
+                   FontSize="13" />
+
+          <!-- The garbled-recovery candidates (best first; a click applies). -->
+          <ListBox x:Name="CodecCandidates"
+                   Grid.Row="5"
+                   Height="58"
+                   FontSize="12"
+                   Margin="0,4,0,0" />
+        </Grid>
+      </TabItem>
+
+
       <!-- The net tools page (ticket #20). The XAML carries no visible strings —
            src/app/tools_net.rs sets every label from the i18n dictionaries and
            wires the controls by these names. -->

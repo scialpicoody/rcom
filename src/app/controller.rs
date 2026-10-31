@@ -147,9 +147,6 @@ pub struct MainController {
     tx_hook_enable: Ref<CheckBox>,
     script_editor: Ref<TextBox>,
     // The Terminal placeholder (ticket #34's slot).
-    terminal_tab: Ref<TabItem>,
-    terminal_status: Ref<TextBlock>,
-    terminal_empty: Ref<TextBlock>,
     // The `+` port picker flyout (mounted once, content rebuilt per listing).
     picker_flyout: RefCell<Option<Ref<Flyout>>>,
     // The tab-close confirm flyout (the §4.1 confirm for tabs with open ports;
@@ -256,9 +253,6 @@ impl MainController {
             tx_hook_box: NameScopeExtensions::get(element, "TxHookBox"),
             tx_hook_enable: NameScopeExtensions::get(element, "TxHookEnable"),
             script_editor: NameScopeExtensions::get(element, "ScriptEditor"),
-            terminal_tab: NameScopeExtensions::get(element, "TerminalTab"),
-            terminal_status: NameScopeExtensions::get(element, "TerminalStatus"),
-            terminal_empty: NameScopeExtensions::get(element, "TerminalEmpty"),
             picker_flyout: RefCell::new(None),
             close_tab_flyout: RefCell::new(None),
             _closing_guard: RefCell::new(None),
@@ -380,12 +374,6 @@ impl MainController {
         self.tx_hook_box.set_placeholder_text(Some(&t!("tx_hook_hint")));
         self.tx_hook_enable.set_content(Some(Rc::new(t!("tx_hook_enable").to_string())));
         self.script_editor.set_placeholder_text(Some(&t!("script_editor_hint")));
-
-        // The Terminal placeholder (ticket #34's slot — caption/status only).
-        ui_patterns::tab_header(&self.terminal_tab, &t!("terminal_tab"));
-        self.terminal_status
-            .set_text(Some(&t!("terminal_placeholder_status")));
-        self.terminal_empty.set_text(Some(&t!("terminal_placeholder_empty")));
 
         // The Open/Close label tracks the active tab's port state.
         let active = self.active_vm();
@@ -1952,6 +1940,32 @@ fn port_label(info: &PortInfo) -> String {
 /// language selector — ticket #25). Static labels, placeholders, captions and
 /// the window title re-render; history log rows keep the language they were
 /// rendered in (they are data, not chrome).
+/// The active session's visible log lines as space-joined row texts
+/// (`RX 70 …` per data line, the note text per note line). The demo paths
+/// use this instead of walking the rendered row tree — the model is the
+/// source the rows render from.
+pub(crate) fn active_session_row_texts() -> Vec<String> {
+    let Some(vm) = PUMP.with(|pump| pump.borrow().controller.clone())
+        .and_then(|controller| controller.active_vm())
+    else {
+        return Vec::new();
+    };
+    let vm = vm.borrow();
+    vm.visible_lines()
+        .iter()
+        .map(|line| match line {
+            LogLine::Data { direction, bytes, .. } => {
+                let badge = match direction {
+                    Direction::Rx => "RX",
+                    Direction::Tx => "TX",
+                };
+                format!("{badge} {}", rcom::core::codec::hex_spaced(bytes))
+            }
+            LogLine::Note { text, .. } => text.clone(),
+        })
+        .collect()
+}
+
 pub(crate) fn apply_all_strings() {
     PUMP.with(|pump| {
         if let Some(controller) = pump.borrow().controller.clone() {
