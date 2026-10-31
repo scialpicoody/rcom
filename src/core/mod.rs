@@ -16,6 +16,10 @@
 //! - [`port`]: the serial layer — the [`port::SerialBackend`] trait, the real
 //!   `serialport` implementation, the mock backend, the manager/session handles
 //!   the UI drives, the reconnect state machine and the hotplug poller.
+//! - [`plot`]: the plot engine (issue #24) — the global named-channel point
+//!   store, the Lua protocol-decoder host (`decode(bytes, ts)` scripts + the
+//!   `rcom.ui` tap API) and the `RCOM_PLOTDEMO` generator; the UI's custom
+//!   render control samples the store on its pump tick.
 
 pub mod bus;
 pub mod codec;
@@ -23,9 +27,11 @@ pub mod error;
 pub mod logstore;
 pub mod lua;
 pub mod nettools;
+pub mod plot;
 pub mod port;
 
 pub use bus::{
-    Event, EventBus, LogEvent, LogLevel, PortEvent, PortState, ScriptOutEvent, ScriptOutKind,
+    Event, EventBus, LogEvent, LogLevel, PlotEvent, PlotEventKind, PortEvent, PortState,
+    ScriptOutEvent, ScriptOutKind,
 };
 pub use error::{CoreError, Result};

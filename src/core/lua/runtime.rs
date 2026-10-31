@@ -202,6 +202,9 @@ impl LuaRuntime {
         // Functions resolve the process-global net hub lazily; without one they
         // still run (one-shots are hub-independent).
         crate::core::nettools::lua_api::install(&lua)?;
+        // The `rcom.ui` plot table (issue #24): the `add_point` tap the decoders
+        // (and any script) use; merges into the same `rcom` global.
+        crate::core::plot::lua_api::install(&lua)?;
 
         // Script VMs announce themselves, then head.lua sets up print/log/sys/…
         lua.globals().set("runType", "script")?;
@@ -244,6 +247,30 @@ impl LuaRuntime {
     /// this for every RX chunk).
     pub fn feed_uart(&self, bytes: &[u8]) {
         self.inner.trigger(-1, "uart", Some(bytes.to_vec()));
+    }
+
+    /// Whether `name` is a function global in this VM (the plot decoder host
+    /// checks the `decode` contract, issue #24).
+    pub fn has_function(&self, name: &str) -> bool {
+        self.inner
+            .lua
+            .globals()
+            .get::<Function>(name)
+            .is_ok()
+    }
+
+    /// Calls the global function `name(bytes, timestamp_ms)` — the plot
+    /// decoder seam (issue #24): the decoder host feeds every RX chunk into the
+    /// script's `decode`. Unlike `tiggerCB`, a script error is returned (the
+    /// host decides: a broken decoder stops, it does not spam).
+    pub fn call_bytes_function(&self, name: &str, bytes: &[u8], timestamp_ms: f64) -> mlua::Result<()> {
+        if self.is_stopped() {
+            return Err(mlua::Error::runtime("script stopped"));
+        }
+        self.inner.arm_stop_hook();
+        let function = self.inner.lua.globals().get::<Function>(name)?;
+        let data = self.inner.lua.create_string(bytes)?;
+        function.call::<()>((data, timestamp_ms))
     }
 
     /// Runs a line of Lua in the running VM (llcom's `RunCommand` console path).
