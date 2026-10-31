@@ -7,6 +7,7 @@ pub(crate) mod i18n;
 mod quicksend;
 pub(crate) mod scriptstore;
 mod tools_net;
+mod tools_mqtt;
 
 use crate::main_window::MainWindow;
 use ferroui_base::{

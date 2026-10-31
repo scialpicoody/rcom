@@ -148,6 +148,11 @@ pub enum Event {
     /// refined by the nettools ticket). Bridged net RX leaves the bus towards
     /// the port write path as a normal TX there.
     Net(crate::core::nettools::NetEvent),
+    /// MQTT tool (issue #21): session lifecycle and traffic of the MQTT client
+    /// instances (docs/ui-drafts/05-contract.md §1.5; the schema is owned and
+    /// refined by the mqtt ticket). Bridged MQTT RX leaves the bus towards the
+    /// port write path as a normal TX there.
+    Mqtt(crate::core::mqtt::MqttEvent),
 }
 
 /// The sending half of the event bus. Clones subscribe new consumers through
@@ -238,6 +243,7 @@ mod tests {
                 Event::Port(_) => "port".into(),
                 Event::ScriptOut(_) => "script".into(),
                 Event::Net(_) => "net".into(),
+                Event::Mqtt(_) => "mqtt".into(),
             })
             .collect();
 

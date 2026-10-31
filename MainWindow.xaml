@@ -252,6 +252,87 @@
                    Margin="0,6,0,0" />
         </Grid>
       </TabItem>
+
+      <!-- The MQTT tools page (ticket #21). The XAML carries no visible strings —
+           src/app/tools_mqtt.rs sets every label from the i18n dictionaries and
+           wires the controls by these names. -->
+      <TabItem x:Name="MqttTab">
+        <Grid RowDefinitions="Auto,Auto,Auto,Auto,*" Margin="4">
+          <!-- Connection row: broker endpoint, credentials, TLS toggle, start. -->
+          <StackPanel Grid.Row="0"
+                      Orientation="Horizontal"
+                      Spacing="6">
+            <TextBox x:Name="MqttHostBox"
+                     MinWidth="150" />
+            <TextBox x:Name="MqttPortBox"
+                     MinWidth="64" />
+            <TextBox x:Name="MqttClientBox"
+                     MinWidth="110" />
+            <TextBox x:Name="MqttUserBox"
+                     MinWidth="90" />
+            <TextBox x:Name="MqttPassBox"
+                     MinWidth="90" />
+            <CheckBox x:Name="MqttTlsCheck"
+                      VerticalAlignment="Center" />
+            <Button x:Name="MqttConnectButton"
+                    MinWidth="90" />
+          </StackPanel>
+
+          <!-- Subscription row: filter box + QoS + add/remove + the live list
+               (select-to-remove). -->
+          <StackPanel Grid.Row="1"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      Margin="0,6,0,0">
+            <TextBox x:Name="MqttSubBox"
+                     MinWidth="170" />
+            <ComboBox x:Name="MqttSubQosSelector"
+                      MinWidth="70" />
+            <Button x:Name="MqttSubButton"
+                    MinWidth="70" />
+            <Button x:Name="MqttUnsubButton"
+                    MinWidth="70" />
+            <ComboBox x:Name="MqttSubsList"
+                      MinWidth="190" />
+          </StackPanel>
+
+          <!-- Publish row: topic + QoS + retain + payload + publish. -->
+          <StackPanel Grid.Row="2"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      Margin="0,6,0,0">
+            <TextBox x:Name="MqttPubTopicBox"
+                     MinWidth="150" />
+            <ComboBox x:Name="MqttPubQosSelector"
+                      MinWidth="70" />
+            <CheckBox x:Name="MqttRetainCheck"
+                      VerticalAlignment="Center" />
+            <TextBox x:Name="MqttPubPayloadBox"
+                     MinWidth="240" />
+            <Button x:Name="MqttPubButton"
+                    MinWidth="70" />
+          </StackPanel>
+
+          <!-- Bridge row: the MQTT⇄serial toggle + its publish topic + status. -->
+          <StackPanel Grid.Row="3"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      Margin="0,6,0,0">
+            <CheckBox x:Name="MqttBridgeCheck"
+                      VerticalAlignment="Center" />
+            <TextBox x:Name="MqttBridgeTopicBox"
+                     MinWidth="170" />
+            <TextBlock x:Name="MqttStatus"
+                       FontSize="12"
+                       VerticalAlignment="Center" />
+          </StackPanel>
+
+          <ListBox x:Name="MqttLog"
+                   Grid.Row="4"
+                   FontSize="12"
+                   Margin="0,6,0,0" />
+        </Grid>
+      </TabItem>
     </TabControl>
   </Grid>
 </Window>

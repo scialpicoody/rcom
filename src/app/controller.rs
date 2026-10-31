@@ -188,6 +188,8 @@ impl MainController {
         MainController::setup_script_page(&this);
         // ISSUE #20 (one insertion point): the net tools page of the bottom pane.
         super::tools_net::attach(element);
+        // ISSUE #21 (one insertion point): the MQTT tools page of the bottom pane.
+        super::tools_mqtt::attach(element);
         wire_events(&this);
         start_pump(&this);
         MainController::autodemo_persist_check(&this);
@@ -848,6 +850,8 @@ impl MainController {
             UiMsg::SetEncoding(encoding) => self.apply_set_encoding(encoding),
             // ISSUE #20 (one insertion point): the net tools page consumes its events.
             UiMsg::Net(net) => super::tools_net::apply_net(net),
+            // ISSUE #21 (one insertion point): the MQTT tools page consumes its events.
+            UiMsg::Mqtt(mqtt) => super::tools_mqtt::apply_mqtt(mqtt),
         }
     }
 
