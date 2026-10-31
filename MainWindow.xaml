@@ -491,6 +491,103 @@
                    Margin="0,6,0,0" />
         </Grid>
       </TabItem>
+
+<!-- The settings page (issue #25): the app-global page of the bottom pane —
+           launch defaults (port/baud/encoding), the log directory override,
+           language, theme and motion. The XAML carries no visible strings —
+           src/app/tools_settings.rs sets every label from the i18n
+           dictionaries, wires the controls by these names, persists every
+           change to <config>/rcom/settings.toml and applies theme/language
+           live. The port selector is filled from the port listings (the same
+           UiMsg::Ports the toolbar consumes). -->
+      <TabItem x:Name="SettingsTab">
+        <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,*,Auto" Margin="4">
+          <!-- Launch defaults row: port + baud + encoding, preselected on
+               launch (settings load before the window builds). -->
+          <StackPanel Grid.Row="0"
+                      Orientation="Horizontal"
+                      Spacing="6">
+            <TextBlock x:Name="SettingsPortCaption"
+                       VerticalAlignment="Center"
+                       FontSize="12" />
+            <ComboBox x:Name="SettingsPortSelector"
+                      MinWidth="160" />
+            <TextBlock x:Name="SettingsBaudCaption"
+                       VerticalAlignment="Center"
+                       FontSize="12" />
+            <ComboBox x:Name="SettingsBaudSelector"
+                      MinWidth="90" />
+            <TextBlock x:Name="SettingsEncodingCaption"
+                       VerticalAlignment="Center"
+                       FontSize="12" />
+            <ComboBox x:Name="SettingsEncodingSelector"
+                      MinWidth="100" />
+          </StackPanel>
+
+          <!-- Log directory row: the override path (empty = the platform
+               default). Applies at the next launch — the engine's log store
+               starts before the window. -->
+          <StackPanel Grid.Row="1"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      Margin="0,6,0,0">
+            <TextBlock x:Name="SettingsLogDirCaption"
+                       VerticalAlignment="Center"
+                       FontSize="12" />
+            <TextBox x:Name="SettingsLogDirBox"
+                     MinWidth="320" />
+            <TextBlock x:Name="SettingsLogDirNote"
+                       FontSize="11"
+                       VerticalAlignment="Center" />
+          </StackPanel>
+
+          <!-- Language row: follow-OS default, en/zh picked live (the
+               dictionaries re-apply without a restart). -->
+          <StackPanel Grid.Row="2"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      Margin="0,6,0,0">
+            <TextBlock x:Name="SettingsLanguageCaption"
+                       VerticalAlignment="Center"
+                       FontSize="12" />
+            <ComboBox x:Name="SettingsLanguageSelector"
+                      MinWidth="140" />
+          </StackPanel>
+
+          <!-- Theme row: dark default (a serial tool's home), Light and
+               FollowOS — the variant switches live. -->
+          <StackPanel Grid.Row="3"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      Margin="0,6,0,0">
+            <TextBlock x:Name="SettingsThemeCaption"
+                       VerticalAlignment="Center"
+                       FontSize="12" />
+            <ComboBox x:Name="SettingsThemeSelector"
+                      MinWidth="140" />
+            <CheckBox x:Name="SettingsReducedMotionCheck"
+                      VerticalAlignment="Center" />
+          </StackPanel>
+
+          <!-- The status line (page-pattern slot): the save outcome, and the
+               settings file the page writes. -->
+          <StackPanel Grid.Row="4"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      Margin="0,6,0,0">
+            <TextBlock x:Name="SettingsStatus"
+                       FontSize="12"
+                       VerticalAlignment="Center" />
+          </StackPanel>
+
+          <!-- Reserved growth space (log row cap, certificate overrides …). -->
+          <Grid Grid.Row="5" />
+
+          <TextBlock x:Name="SettingsPathNote"
+                     Grid.Row="6"
+                     FontSize="11" />
+        </Grid>
+      </TabItem>
     </TabControl>
   </Grid>
 </Window>
