@@ -174,11 +174,14 @@ async fn run(
         tokio::select! {
             _ = cancelled(cancel.subscribe()) => {
                 // Graceful MQTT disconnect: rumqttc's `disconnect` only queues
-                // the packet — the event loop writes it on its next poll, so
-                // give it one bounded poll before the loop is dropped
-                // (dropping right away would lose the queued DISCONNECT).
+                // the packet — the event loop writes it on its next poll(s).
+                // One poll is not always enough (the loop may owe the network a
+                // read first, or flush the write in a second poll — the #26
+                // sweep caught this as a flaky missing DISCONNECT), so poll in
+                // a bounded loop; a connection error ends it (the broker hung
+                // up, the packet went with the socket).
                 let _ = client.disconnect().await;
-                let _ = tokio::time::timeout(DISCONNECT_FLUSH, eventloop.poll()).await;
+                flush_disconnect(eventloop).await;
                 return Ok(());
             }
             command = cmd_rx.recv() => match command {
@@ -270,7 +273,7 @@ async fn run(
                     tokio::select! {
                         _ = cancelled(cancel.subscribe()) => {
                             let _ = client.disconnect().await;
-                            let _ = tokio::time::timeout(DISCONNECT_FLUSH, eventloop.poll()).await;
+                            flush_disconnect(eventloop).await;
                             return Ok(());
                         }
                         _ = tokio::time::sleep(RETRY_BACKOFF) => {}
@@ -285,6 +288,27 @@ async fn run(
 /// including the refused-CONNACK codes).
 fn error_message(error: &ConnectionError) -> String {
     error.to_string()
+}
+
+/// Drives the event loop until the queued DISCONNECT is on the wire or
+/// [`DISCONNECT_FLUSH`] elapses (the bounded stop flush — see the cancel arm
+/// in `run`). Each poll resolves on the next network event, so an idle-but-
+/// healthy socket exits early through the broker's hang-up; a lost race (the
+/// packet never got written) burns the full window once and returns.
+async fn flush_disconnect(mut eventloop: rumqttc::EventLoop) {
+    let deadline = tokio::time::Instant::now() + DISCONNECT_FLUSH;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        match tokio::time::timeout(deadline - now, eventloop.poll()).await {
+            Ok(Ok(_)) => continue,
+            // The connection died (the broker's close on DISCONNECT included):
+            // nothing more to flush.
+            Ok(Err(_)) | Err(_) => return,
+        }
+    }
 }
 
 fn qos_of(qos: MqttQos) -> QoS {
