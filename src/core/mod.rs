@@ -13,6 +13,10 @@
 //!   channels with IPv6, the net⇄serial bridge, the `rcom.net` script API and
 //!   the `RCOM_NETDEMO` self-demo; channel events reach the bus as
 //!   [`bus::Event::Net`].
+//! - [`mqtt`]: the MQTT test tool (issue #21) — broker sessions (raw TCP or
+//!   TLS) over `rumqttc`, the MQTT⇄serial bridge and the `RCOM_MQTTDEMO`
+//!   self-demo against the in-process mock broker; session events reach the
+//!   bus as [`bus::Event::Mqtt`].
 //! - [`port`]: the serial layer — the [`port::SerialBackend`] trait, the real
 //!   `serialport` implementation, the mock backend, the manager/session handles
 //!   the UI drives, the reconnect state machine and the hotplug poller.
@@ -22,6 +26,7 @@ pub mod codec;
 pub mod error;
 pub mod logstore;
 pub mod lua;
+pub mod mqtt;
 pub mod nettools;
 pub mod port;
 

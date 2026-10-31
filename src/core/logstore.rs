@@ -206,6 +206,43 @@ impl LogStore {
                     net.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
                 ));
             }
+            Event::Mqtt(mqtt) => {
+                // MQTT session traffic joins the session file with the tool's
+                // own marker (issue #21). Publish payloads are lossy text; the
+                // ring buffer stays serial-only.
+                let line = match &mqtt.kind {
+                    crate::core::mqtt::MqttEventKind::Connected { server } => {
+                        format!("==  [mqtt#{}] connected to {server}", mqtt.session_id)
+                    }
+                    crate::core::mqtt::MqttEventKind::Disconnected { .. } => {
+                        format!("==  [mqtt#{}] closed", mqtt.session_id)
+                    }
+                    crate::core::mqtt::MqttEventKind::Error { message } => {
+                        format!("!!  [mqtt#{}] error: {message}", mqtt.session_id)
+                    }
+                    crate::core::mqtt::MqttEventKind::Subscribed { topic, qos } => {
+                        format!("==  [mqtt#{}] subscribed {topic} (qos {})", mqtt.session_id, qos.wire())
+                    }
+                    crate::core::mqtt::MqttEventKind::Unsubscribed { topic } => {
+                        format!("==  [mqtt#{}] unsubscribed {topic}", mqtt.session_id)
+                    }
+                    crate::core::mqtt::MqttEventKind::Message { direction, topic, payload, .. } => {
+                        let tag = match direction {
+                            crate::core::mqtt::MqttDirection::Rx => "RX",
+                            crate::core::mqtt::MqttDirection::Tx => "TX",
+                        };
+                        format!(
+                            "{tag}  [mqtt#{}] {topic}  {:?}",
+                            mqtt.session_id,
+                            String::from_utf8_lossy(payload.as_slice())
+                        )
+                    }
+                };
+                self.write_line(format!(
+                    "{}  ~~  {line}",
+                    mqtt.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
+                ));
+            }
         }
     }
 
