@@ -23,12 +23,13 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use rcom::core::bus::{
-    DataEvent, Direction, Event, LogEvent, LogLevel, PortEvent, PortState, ScriptOutEvent,
-    ScriptOutKind,
+    DataEvent, Direction, Event, LogEvent, LogLevel, PlotEvent, PlotEventKind, PortEvent, PortState,
+    ScriptOutEvent, ScriptOutKind,
 };
 use rcom::core::codec::{hex_spaced, lossy_utf8, TextEncoding};
 use rcom::core::logstore::{default_log_dir, LogStore};
 use rcom::core::lua::{LuaRuntime, UartSink};
+use rcom::core::plot::{demo, DecoderHost};
 use rcom::core::port::manager::PortManager;
 use rcom::core::port::mock::{MockBackend, MockPlug, MOCK_PORT_NAME};
 use rcom::core::port::reconnect;
@@ -53,6 +54,12 @@ pub enum Command {
     StopScript,
     /// Installs or clears the session's Lua pre-send hook (`None` = disabled).
     SetHook(Option<String>),
+    /// The plot page's decoder Start (issue #24): boots a decoder VM with this
+    /// script on the core runtime (a previous one is stopped first). Output
+    /// flows back as [`UiMsg::Plot`] lifecycle events.
+    PlotDecoderStart { name: String, code: String },
+    /// The plot page's decoder Stop.
+    PlotDecoderStop,
 }
 
 /// One data chunk for the UI's log model: the raw bytes stay authoritative so an
@@ -89,6 +96,9 @@ pub enum UiMsg {
     /// An MQTT-tool event (issue #21); the tools page consumes it and the row
     /// text also lands in the main log view.
     Mqtt(rcom::core::mqtt::MqttEvent),
+    /// A plot-pipeline event (issue #24); the plot page consumes it and the
+    /// row also lands in the main log view.
+    Plot(PlotEvent),
 }
 
 /// The process-wide handle the UI thread uses to reach the core. `ui_rx` is drained
@@ -242,14 +252,22 @@ async fn driver(
     // `ping` proves data flows across the unplug/replug.
     let mut reconnected = false;
     let luademo = luademo_enabled();
+    let plotdemo = plotdemo_enabled();
     let requested = AutodemoMode::from_env();
-    let mode = if requested == AutodemoMode::Off && luademo {
-        AutodemoMode::Basic
+    let mode = if requested == AutodemoMode::Off && (luademo || plotdemo) {
+        AutodemoMode::Basic // both demos run against the MOCK0 open
     } else {
         requested
     };
     if luademo {
         tracing::info!("RCOM_LUADEMO=1: driving the Lua demo (llcom sample on MOCK0)");
+    }
+    if plotdemo {
+        tracing::info!(
+            "RCOM_PLOTDEMO: driving the plot demo (bundled framed-protocol decoder, \
+             generator on MOCK0; mode {:?})",
+            demo::PlotDemoMode::from_env()
+        );
     }
     match mode {
         AutodemoMode::Off | AutodemoMode::Persist => {}
@@ -370,6 +388,16 @@ async fn driver(
     // The panel demo's two proofs: the Run print surfaced, the Stop unwound.
     let mut panel_demo_ran = false;
     let mut panel_stop_ok = false;
+    // The plot decoder (issue #24): Start/Stop from the plot page (and the
+    // PLOTDEMO's bundled decoder) boot it like the script-panel VM — on a
+    // blocking task, adopted through a generation counter. The feed itself
+    // happens in the event arm below: every RX bus chunk goes into `decode`
+    // (the bus tap), and the decoder writes the plot store directly.
+    let mut plot_decoder: Option<DecoderHost> = None;
+    let mut plot_generation: u64 = 0;
+    let (plot_ready_tx, mut plot_ready_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PlotDecoderReady>();
+    let mut plotdemo_started = false;
 
     let mut events = bus.subscribe();
     loop {
@@ -384,6 +412,9 @@ async fn driver(
                         &mut panel_vm,
                         &mut panel_generation,
                         panel_ready_tx.clone(),
+                        &mut plot_decoder,
+                        &mut plot_generation,
+                        plot_ready_tx.clone(),
                         command,
                     )
                     .await
@@ -415,6 +446,37 @@ async fn driver(
                     } else if let Ok(vm) = arriving.vm {
                         // Superseded while loading: stop it before it runs.
                         vm.stop();
+                    }
+                }
+            },
+            ready = plot_ready_rx.recv() => match ready {
+                None => break, // the sender is gone: app shutting down
+                Some(arriving) => {
+                    if arriving.generation == plot_generation {
+                        match arriving.result {
+                            Ok(decoder) => {
+                                tracing::info!(name = decoder.name(), "plot decoder started");
+                                bus.publish(Event::Plot(PlotEvent {
+                                    timestamp: chrono::Local::now(),
+                                    kind: PlotEventKind::DecoderStarted {
+                                        name: decoder.name().to_string(),
+                                    },
+                                }));
+                                plot_decoder = Some(decoder);
+                            }
+                            Err(error) => {
+                                bus.publish(Event::Plot(PlotEvent {
+                                    timestamp: chrono::Local::now(),
+                                    kind: PlotEventKind::DecoderFailed {
+                                        name: arriving.name.clone(),
+                                        message: error.to_string(),
+                                    },
+                                }));
+                            }
+                        }
+                    } else if let Ok(decoder) = arriving.result {
+                        // Superseded by a newer Start/Stop while loading.
+                        decoder.stop();
                     }
                 }
             },
@@ -515,6 +577,59 @@ async fn driver(
                             }
                         }
                     }
+                    // Plot demo (issue #24): on the MOCK0 open, boot the bundled
+                    // framed-protocol decoder and start the frame generator — the
+                    // full pipeline (generator → mock echo → bus tap → decoder →
+                    // plot store → UI sampling) runs from here.
+                    if plotdemo && !plotdemo_started {
+                        if let Event::Port(port) = &event {
+                            if port.state == PortState::Open && port.port == MOCK_PORT_NAME {
+                                plotdemo_started = true;
+                                plot_generation += 1;
+                                spawn_plot_decoder(
+                                    bus.clone(),
+                                    "bundled: framed protocol".into(),
+                                    rcom::core::lua::scripts::FRAMED_DECODER_SAMPLE.into(),
+                                    plot_generation,
+                                    plot_ready_tx.clone(),
+                                );
+                                let config = match demo::PlotDemoMode::from_env() {
+                                    demo::PlotDemoMode::Fast => demo::DemoConfig::fast(),
+                                    _ => demo::DemoConfig::basic(),
+                                };
+                                demo::spawn_generator(Arc::clone(&manager), config);
+                            }
+                        }
+                    }
+                    // The plot decoder's bus tap: every RX chunk feeds
+                    // `decode(bytes, ts)`; a script error fails the decoder once
+                    // (one Plot event, the tap unarms), never per chunk.
+                    if let Event::Data(data) = &event {
+                        if data.direction == Direction::Rx && plot_decoder.is_some() {
+                            let mut failure: Option<String> = None;
+                            if let Some(decoder) = &plot_decoder {
+                                if let Err(error) = decoder.feed(
+                                    data.bytes.as_slice(),
+                                    data.timestamp.timestamp_millis() as f64,
+                                ) {
+                                    failure = Some(error.to_string());
+                                }
+                            }
+                            if let Some(message) = failure {
+                                let name = plot_decoder
+                                    .as_ref()
+                                    .map(|decoder| decoder.name().to_string())
+                                    .unwrap_or_default();
+                                if let Some(decoder) = plot_decoder.take() {
+                                    decoder.stop();
+                                }
+                                bus.publish(Event::Plot(PlotEvent {
+                                    timestamp: chrono::Local::now(),
+                                    kind: PlotEventKind::DecoderFailed { name, message },
+                                }));
+                            }
+                        }
+                    }
                     if let Event::Port(port) = &event {
                         match port.state {
                             PortState::WatchDesired => tracing::info!(
@@ -573,6 +688,18 @@ async fn driver(
                                 break; // UI gone
                             }
                         }
+                        // ISSUE #24: plot events render one row (decoder
+                        // lifecycle) and go to the plot page as their own message.
+                        Event::Plot(plot) => {
+                            let row = format_plot_row(plot);
+                            tracing::debug!(target: "rcom::rows", "{row}");
+                            if ui.send(UiMsg::Row { text: row, direction: None }).is_err() {
+                                break; // UI gone
+                            }
+                            if ui.send(UiMsg::Plot(plot.clone())).is_err() {
+                                break; // UI gone
+                            }
+                        }
                         Event::Port(_) | Event::Log(_) | Event::ScriptOut(_) => {
                             if let Some(row) = render_event(&event) {
                                 tracing::debug!(target: "rcom::rows", "{row}");
@@ -603,6 +730,9 @@ async fn driver(
     }
     if let Some(vm) = panel_vm {
         vm.stop();
+    }
+    if let Some(decoder) = plot_decoder {
+        decoder.stop();
     }
 }
 
@@ -702,6 +832,35 @@ fn spawn_panel_vm(
     });
 }
 
+/// A freshly started plot decoder on its way to the driver (the panel VM's
+/// readiness pattern): adopted when the generation is still current, stopped
+/// when a newer Start/Stop superseded it.
+struct PlotDecoderReady {
+    generation: u64,
+    name: String,
+    result: mlua::Result<DecoderHost>,
+}
+
+/// Boots a plot decoder VM (issue #24) on a blocking task — `run_script` may
+/// spin at load, and the driver must never block. The readiness message
+/// carries the stop switch either way.
+fn spawn_plot_decoder(
+    bus: EventBus,
+    name: String,
+    code: String,
+    generation: u64,
+    ready: tokio::sync::mpsc::UnboundedSender<PlotDecoderReady>,
+) {
+    tokio::task::spawn_blocking(move || {
+        let result = DecoderHost::start(name.clone(), bus, &code);
+        let _ = ready.send(PlotDecoderReady {
+            generation,
+            name,
+            result,
+        });
+    });
+}
+
 async fn handle_command(
     manager: &Arc<PortManager>,
     ui: &std::sync::mpsc::Sender<UiMsg>,
@@ -709,6 +868,9 @@ async fn handle_command(
     panel_vm: &mut Option<LuaRuntime>,
     panel_generation: &mut u64,
     panel_ready: tokio::sync::mpsc::UnboundedSender<PanelVmReady>,
+    plot_decoder: &mut Option<DecoderHost>,
+    plot_generation: &mut u64,
+    plot_ready: tokio::sync::mpsc::UnboundedSender<PlotDecoderReady>,
     command: Command,
 ) {
     match command {
@@ -773,6 +935,30 @@ async fn handle_command(
                 });
             }
         },
+        Command::PlotDecoderStart { name, code } => {
+            // A fresh VM per start: stop the old one first (a Stopped notice
+            // only when there was one).
+            if let Some(old) = plot_decoder.take() {
+                let name = old.name().to_string();
+                old.stop();
+                bus.publish(Event::Plot(PlotEvent {
+                    timestamp: chrono::Local::now(),
+                    kind: PlotEventKind::DecoderStopped { name },
+                }));
+            }
+            *plot_generation += 1;
+            spawn_plot_decoder(bus.clone(), name, code, *plot_generation, plot_ready);
+        }
+        Command::PlotDecoderStop => {
+            if let Some(old) = plot_decoder.take() {
+                let name = old.name().to_string();
+                old.stop();
+                bus.publish(Event::Plot(PlotEvent {
+                    timestamp: chrono::Local::now(),
+                    kind: PlotEventKind::DecoderStopped { name },
+                }));
+            }
+        }
     }
 }
 
@@ -788,6 +974,7 @@ pub fn render_event(event: &Event) -> Option<String> {
         Event::ScriptOut(out) => Some(format_script_row(out)),
         Event::Net(_) => None,
         Event::Mqtt(_) => None,
+        Event::Plot(_) => None,
     }
 }
 
@@ -877,6 +1064,23 @@ pub fn format_script_row(out: &ScriptOutEvent) -> String {
     match &out.kind {
         ScriptOutKind::Print { line } => format!("{stamp}  ~~  {line}"),
         ScriptOutKind::Error { message } => format!("{stamp}  ~~  !! script error: {message}"),
+    }
+}
+
+/// Plot rows (issue #24) read like the net rows: a `[plot]` tag, lifecycle
+/// notes as `==`, failures flagged.
+pub fn format_plot_row(plot: &PlotEvent) -> String {
+    let stamp = plot.timestamp.format("%H:%M:%S%.3f");
+    match &plot.kind {
+        PlotEventKind::DecoderStarted { name } => {
+            format!("{stamp}  ==  [plot] decoder started: {name}")
+        }
+        PlotEventKind::DecoderStopped { name } => {
+            format!("{stamp}  ==  [plot] decoder stopped: {name}")
+        }
+        PlotEventKind::DecoderFailed { name, message } => {
+            format!("{stamp}  ~~  !! [plot] decoder failed: {name}: {message}")
+        }
     }
 }
 
@@ -1072,12 +1276,40 @@ mod tests {
         }))
         .is_some());
     }
+
+    /// The plot lifecycle rows (issue #24): a `[plot]` tag, `==` for the
+    /// lifecycle notes, `~~ !!` flagging a failure; `render_event` passes them
+    /// through (they land in the main log view too).
+    #[test]
+    fn plot_rows_render_lifecycle() {
+        let event = |kind| Event::Plot(PlotEvent { timestamp: stamp(), kind });
+        let started = render_event(&event(PlotEventKind::DecoderStarted { name: "d".into() }))
+            .expect("plot events render");
+        assert!(started.contains("==  [plot] decoder started: d"), "{started}");
+        let stopped = format_plot_row(&PlotEvent {
+            timestamp: stamp(),
+            kind: PlotEventKind::DecoderStopped { name: "d".into() },
+        });
+        assert!(stopped.contains("==  [plot] decoder stopped: d"), "{stopped}");
+        let failed = format_plot_row(&PlotEvent {
+            timestamp: stamp(),
+            kind: PlotEventKind::DecoderFailed { name: "d".into(), message: "boom".into() },
+        });
+        assert!(failed.contains("~~") && failed.contains("!! [plot] decoder failed: d: boom"), "{failed}");
+    }
 }
 
 /// `RCOM_LUADEMO=1`: run llcom's README sample in a script VM against MOCK0 —
 /// its log/timer output shows up as `~~` rows in the log view (ticket #18 demo).
 fn luademo_enabled() -> bool {
     std::env::var("RCOM_LUADEMO").is_ok_and(|value| value == "1")
+}
+
+/// `RCOM_PLOTDEMO=1|fast`: drive the plot pipeline (issue #24) — the bundled
+/// framed-protocol decoder plus a frame generator on MOCK0. `fast` raises the
+/// rate to fill the 10k-point rings for the render-budget proof.
+fn plotdemo_enabled() -> bool {
+    demo::PlotDemoMode::from_env() != demo::PlotDemoMode::Off
 }
 
 /// Both backends, behind one list: the real ports of the machine plus the mock's

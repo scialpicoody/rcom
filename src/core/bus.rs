@@ -135,6 +135,30 @@ pub enum ScriptOutKind {
     Error { message: String },
 }
 
+/// A plot-pipeline event (issue #24): the decoder lifecycle. Per-point data
+/// never rides the bus — the decoders write the global plot store directly and
+/// the UI samples it — so the plot's bus presence is these low-rate notices
+/// (the docs/ui-drafts/05-contract.md §1.3 `PlotTap` sketch is superseded by
+/// this: a tap event per point would be the per-point channel this pipeline is
+/// built to avoid).
+#[derive(Debug, Clone)]
+pub struct PlotEvent {
+    pub timestamp: DateTime<Local>,
+    pub kind: PlotEventKind,
+}
+
+/// The kind of a [`PlotEvent`].
+#[derive(Debug, Clone)]
+pub enum PlotEventKind {
+    /// A decoder VM booted and passed the `decode` contract check.
+    DecoderStarted { name: String },
+    /// The decoder was stopped by the user.
+    DecoderStopped { name: String },
+    /// A decoder script failed inside `decode` (or at load); it is stopped —
+    /// reported once, not per chunk.
+    DecoderFailed { name: String, message: String },
+}
+
 /// Everything that can happen in the engine. Later slices extend this enum
 /// (MQTT, settings, ...); consumers must match with a catch-all arm.
 #[derive(Debug, Clone)]
@@ -153,6 +177,9 @@ pub enum Event {
     /// refined by the mqtt ticket). Bridged MQTT RX leaves the bus towards the
     /// port write path as a normal TX there.
     Mqtt(crate::core::mqtt::MqttEvent),
+    /// Plot pipeline (issue #24): decoder lifecycle notices. Additive — the
+    /// per-point data path is the plot store, not the bus.
+    Plot(PlotEvent),
 }
 
 /// The sending half of the event bus. Clones subscribe new consumers through
@@ -244,6 +271,7 @@ mod tests {
                 Event::ScriptOut(_) => "script".into(),
                 Event::Net(_) => "net".into(),
                 Event::Mqtt(_) => "mqtt".into(),
+                Event::Plot(_) => "plot".into(),
             })
             .collect();
 

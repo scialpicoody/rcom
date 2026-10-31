@@ -333,6 +333,61 @@
                    Margin="0,6,0,0" />
         </Grid>
       </TabItem>
+
+      <!-- The plot page (issue #24). The curve area is a PlotView built in code
+           (the design.md pin-gap custom render control) inserted into PlotHost;
+           src/app/tools_plot.rs sets every label from the i18n dictionaries and
+           wires the controls by these names. -->
+      <TabItem x:Name="PlotTab">
+        <Grid RowDefinitions="Auto,*,Auto" Margin="4">
+          <StackPanel Grid.Row="0"
+                      Orientation="Horizontal"
+                      Spacing="6">
+            <TextBlock x:Name="PlotDecoderCaption"
+                       VerticalAlignment="Center"
+                       FontSize="12" />
+            <ComboBox x:Name="PlotDecoderSelector"
+                      MinWidth="170" />
+            <Button x:Name="PlotDecoderStartButton"
+                    MinWidth="56" />
+            <Button x:Name="PlotDecoderStopButton"
+                    MinWidth="56" />
+            <CheckBox x:Name="PlotPauseCheck"
+                      VerticalAlignment="Center" />
+            <Button x:Name="PlotClearButton"
+                    MinWidth="56" />
+            <TextBlock x:Name="PlotStatus"
+                       FontSize="12"
+                       VerticalAlignment="Center" />
+          </StackPanel>
+
+          <!-- The custom plot control lands here (added in code). -->
+          <Grid x:Name="PlotHost"
+                Grid.Row="1"
+                Margin="0,6,0,0" />
+
+          <StackPanel Grid.Row="2"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      HorizontalAlignment="Right"
+                      Margin="0,6,0,0">
+            <TextBlock x:Name="PlotWindowCaption"
+                       VerticalAlignment="Center"
+                       FontSize="12" />
+            <Button x:Name="PlotZoomOutButton"
+                    MinWidth="56" />
+            <TextBlock x:Name="PlotWindowLabel"
+                       VerticalAlignment="Center"
+                       FontSize="12"
+                       MinWidth="52"
+                       TextAlignment="Center" />
+            <Button x:Name="PlotZoomInButton"
+                    MinWidth="56" />
+          </StackPanel>
+        </Grid>
+      </TabItem>
+        </Grid>
+      </TabItem>
     </TabControl>
   </Grid>
 </Window>

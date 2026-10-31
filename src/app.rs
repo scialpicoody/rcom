@@ -4,10 +4,12 @@
 pub(crate) mod controller;
 mod host;
 pub(crate) mod i18n;
+pub(crate) mod plot_view;
 mod quicksend;
 pub(crate) mod scriptstore;
 mod tools_net;
 mod tools_mqtt;
+mod tools_plot;
 
 use crate::main_window::MainWindow;
 use ferroui_base::{

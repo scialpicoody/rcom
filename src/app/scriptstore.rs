@@ -11,7 +11,8 @@ use std::path::PathBuf;
 
 /// The built-in sample scripts of the picker (selecting one loads it into the
 /// editor under its name, as if it were a file). `LLCOM_README_SAMPLE` is the
-/// standalone uart-processing demo; `SEND_CONVERT_HEX` the one-line TX hook.
+/// standalone uart-processing demo; `SEND_CONVERT_HEX` the one-line TX hook;
+/// `FRAMED_DECODER_SAMPLE` the bundled protocol decoder for the plot page (#24).
 pub struct SampleScript {
     pub name: &'static str,
     pub code: &'static str,
@@ -25,6 +26,10 @@ pub const SAMPLES: &[SampleScript] = &[
     SampleScript {
         name: "sample: tx hook (fromHex)",
         code: rcom::core::lua::scripts::SEND_CONVERT_HEX,
+    },
+    SampleScript {
+        name: "sample: decoder (framed protocol)",
+        code: rcom::core::lua::scripts::FRAMED_DECODER_SAMPLE,
     },
 ];
 

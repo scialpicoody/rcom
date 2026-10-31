@@ -243,6 +243,29 @@ impl LogStore {
                     mqtt.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
                 ));
             }
+            Event::Plot(plot) => {
+                // Plot decoder lifecycle joins the durable record with the
+                // tools' `~~` marker (issue #24); per-point data never reaches
+                // the bus, so there is nothing else to log here.
+                use crate::core::bus::PlotEventKind;
+                let line = match &plot.kind {
+                    PlotEventKind::DecoderStarted { name } => {
+                        format!("==  [plot] decoder started: {name}")
+                    }
+                    PlotEventKind::DecoderStopped { name } => {
+                        format!("==  [plot] decoder stopped: {name}")
+                    }
+                    PlotEventKind::DecoderFailed { name, message } => {
+                        format!("!!  [plot] decoder failed: {name}: {message}")
+                    }
+                };
+                self.write_line(format!(
+                    "{}  ~~  {line}",
+                    plot.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
+                ));
+            }
+                ));
+            }
         }
     }
 
