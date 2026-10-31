@@ -192,6 +192,9 @@ impl MainController {
         super::tools_mqtt::attach(element);
         // ISSUE #24 (one insertion point): the plot page of the bottom pane.
         super::tools_plot::attach(element);
+        // ISSUE #22 (one insertion point): the codec toolbox page of the bottom
+        // pane — synchronous pure `core::codec` calls, no pump messages.
+        super::tools_codec::attach(element);
         wire_events(&this);
         start_pump(&this);
         MainController::autodemo_persist_check(&this);
