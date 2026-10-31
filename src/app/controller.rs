@@ -2029,7 +2029,9 @@ pub(crate) fn apply_all_strings() {
 }
 
 /// The payload preview on an entry's send button: escapes line breaks, marks hex
-/// payloads, truncates.
+/// payloads, truncates. (Test-only since #35's edit-in-place replaced the static
+/// button label; the unit tests pin its escaping rules.)
+#[cfg(test)]
 fn entry_button_text(entry: &QuickSendEntry) -> String {
     let payload = if entry.hex {
         format!("{} {}", t!("quick_hex_mark"), entry.payload)

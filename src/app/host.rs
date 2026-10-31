@@ -13,11 +13,11 @@
 //!   buffer + auto-save file sink), the hotplug poller (1 s) and the reconnect state
 //!   machine (docs/design.md, "Serial layer").
 //! - **The mock seam (design-ui §5.7):** the engine's backend is the core's
-//!   [`BackendFactory`]; this file only *selects the mode* — `RCOM_MOCK` when set,
-//!   else the legacy demo vars pin their port (`RCOM_AUTODEMO=reconnect` ⇒ the
-//!   unplug scenario, the other mock-driven demos ⇒ the echo scenario), else the
-//!   core's profile default. Zero `RCOM_MOCK` parsing below beyond that one
-//!   selection; the UI never references it (AC9).
+//!   [`BackendFactory`]; this file only *selects the mode* — the mock-mode env
+//!   var when set, else the legacy demo vars pin their port (`RCOM_AUTODEMO=reconnect`
+//!   ⇒ the unplug scenario, the other mock-driven demos ⇒ the echo scenario),
+//!   else the core's profile default. The env var itself is parsed only inside
+//!   the core's factory; the UI never references it (AC9).
 //! - `RCOM_AUTODEMO` drives a scenario headlessly: `1` opens MOCK0 and sends `ping`
 //!   (the echo is the smoke-run evidence); `reconnect` drives the unplug scenario's
 //!   MockControl trigger through the new seam; `encoding` sends 你好 as GBK and
@@ -183,18 +183,19 @@ pub fn core_host() -> &'static CoreHost {
     HOST.get_or_init(start_engine)
 }
 
-/// The backend-factory mode the engine starts with: `RCOM_MOCK` when set; else
-/// the legacy demo vars pin their port (the demo evidence paths must work in
-/// every build profile); else the core's profile default. The selection is
-/// the *only* mock-env reading outside the core's factory (AC9: none of it in
-/// the UI layer — this is the driver's startup, the seam's selection site).
+/// The backend-factory mode the engine starts with: the mock-mode env var when
+/// set (read by the core's factory); else the legacy demo vars pin their port
+/// (the demo evidence paths must work in every build profile); else the core's
+/// profile default. The selection is the *only* mock-env reading outside the
+/// core's factory (AC9: none of it in the UI layer — this is the driver's
+/// startup, the seam's selection site).
 fn selected_mock_mode() -> MockMode {
     if let Some(mode) = mock_mode_from_env() {
         return mode;
     }
     match AutodemoMode::from_env() {
         AutodemoMode::Reconnect => MockMode::Single(MockScenario::Unplug),
-        AutodemoMode::Multi | AutodemoMode::Cross => MockMode::All,
+        AutodemoMode::Multi | AutodemoMode::Cross | AutodemoMode::Parity => MockMode::All,
         AutodemoMode::Noisy => MockMode::Single(MockScenario::Noisy),
         AutodemoMode::Off => {
             if luademo_enabled() || plotdemo_enabled() {
@@ -333,6 +334,11 @@ pub enum AutodemoMode {
     /// AC8's evidence path: the noisy scenario at 8× for ~10 s (the pump
     /// budget traces are the responsiveness proof).
     Noisy,
+    /// Ticket #26's evidence path: the parity sweep — one headless run walking
+    /// docs/design.md's parity table row by row against the running engine,
+    /// printing one `PARITY <row>: OK|GAP(<detail>)` verdict per row (see
+    /// [`super::parity`]).
+    Parity,
 }
 
 impl AutodemoMode {
@@ -340,7 +346,8 @@ impl AutodemoMode {
     /// `encoding` = the GBK path, `persist` = the quick-send persistence path,
     /// `hook` = the pre-send-hook path, `panel` = the script-panel Run/Stop path,
     /// `multi` = the two-session path, `cross` = the cross-session scripting
-    /// path, else off.
+    /// path, `noisy` = the 8× responsiveness path, `parity` = the parity sweep,
+    /// else off.
     pub fn from_env() -> Self {
         match std::env::var("RCOM_AUTODEMO").as_deref() {
             Ok("1") => Self::Basic,
@@ -352,6 +359,7 @@ impl AutodemoMode {
             Ok("multi") => Self::Multi,
             Ok("cross") => Self::Cross,
             Ok("noisy") => Self::Noisy,
+            Ok("parity") => Self::Parity,
             _ => Self::Off,
         }
     }
@@ -419,6 +427,12 @@ async fn driver(
     }
     match mode {
         AutodemoMode::Off | AutodemoMode::Persist => {}
+        AutodemoMode::Parity => {
+            // Ticket #26's sweep: one headless walk of the parity table, one
+            // verdict line per row. Everything the suite needs (manager, bus,
+            // log store) is already live beside the driver.
+            super::parity::run(Arc::clone(&manager), bus.clone(), Arc::clone(&logstore)).await;
+        }
         AutodemoMode::Basic => {
             if requested == AutodemoMode::Basic {
                 tracing::info!("RCOM_AUTODEMO=1: driving the MOCK0 demo path");
@@ -464,16 +478,23 @@ async fn driver(
                 // session stays usable). Each cycle: trigger → the scripted
                 // reappear window → the machine re-opens → a ping.
                 for cycle in 0..6u32 {
+                    let _ = cycle;
                     let _ = demo.send(Command::MockAction {
                         session_id,
                         action: MockAction::Trigger(MockTrigger::Unplug),
                     });
-                    let _ = cycle;
                     // Reappear (5 s / 8) + the machine's poll cadence + margin.
                     tokio::time::sleep(Duration::from_millis(2200)).await;
-                    let _ = demo.send(Command::SendBytes {
-                        session_id: Some(session_id),
-                        bytes: b"ping".to_vec(),
+                    // The auto-reopen bound a fresh session id — pick it up,
+                    // then inject the "data flows again" ping through THAT
+                    // session's playback control (the unplug scenario
+                    // generates its own data and drops writes; the injected
+                    // ping rides the replugged session to the bus, where the
+                    // evidence arm watches for it).
+                    let Some(current) = id_rx.recv().await else { return };
+                    let _ = demo.send(Command::MockAction {
+                        session_id: current,
+                        action: MockAction::InjectRx(b"ping".to_vec()),
                     });
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }
@@ -992,7 +1013,7 @@ async fn driver(
                     // Plot demo (issue #24): on the MOCK0 open, boot the bundled
                     // framed-protocol decoder. The frame *feed* comes from the
                     // mock itself when the opened port is the framed scenario
-                    // (RCOM_MOCK=framed via the new seam); otherwise the demo
+                    // (the mock-mode env var pinned to framed); otherwise the demo
                     // generator writes frames through the real TX path as before.
                     if plotdemo && !plotdemo_started {
                         if let Event::Port(port) = &event {
@@ -1111,9 +1132,12 @@ async fn driver(
                             }
                             _ => {}
                         }
-                        // The demo trigger tasks need their sessions' ids.
+                        // The demo trigger tasks need their sessions' ids. The
+                        // auto-reopen binds a fresh id (the replacement), so
+                        // Reopened forwards too — the reconnect demo injects
+                        // its post-replug ping on the session that is alive.
                         if let Some(demo_id_tx) = &demo_id_tx {
-                            if port.state == PortState::Open {
+                            if matches!(port.state, PortState::Open | PortState::Reopened) {
                                 let _ = demo_id_tx.send(port.session_id);
                             }
                         }
@@ -1349,6 +1373,8 @@ fn spawn_panel_vm(
             });
             return;
         };
+        // apiQuickSendList reads the shared default profile (parity sweep #26).
+        reportable.set_quicksend_lookup(Some(super::quicksend::QuickSendFileLookup::global()));
         let _ = ready.send(PanelVmReady {
             generation,
             vm: Ok(reportable.clone()),
@@ -1372,11 +1398,14 @@ struct SessionVmReady {
 /// pattern as the panel VM — `create` is bounded setup, the handle is reported
 /// *before* the script chunk runs so the session's death can stop it even
 /// while a script spins at load. The VM is session-bound: its sink writes to
-/// the session, its output rows route to the session's tab.
+/// the session, its output rows route to the session's tab. `port` is the
+/// bound port's name (the caller resolves it) — `apiQuickSendList` reads that
+/// port's quick-send layer.
 fn spawn_session_vm(
     manager: &Arc<PortManager>,
     bus: EventBus,
     session_id: u64,
+    port: Option<String>,
     code: String,
     generation: u64,
     ready: tokio::sync::mpsc::UnboundedSender<SessionVmReady>,
@@ -1392,6 +1421,11 @@ fn spawn_session_vm(
             });
             return;
         };
+        // apiQuickSendList reads the session port's quick-send layer (parity
+        // sweep #26); the port name is resolved by the caller.
+        if let Some(port) = port {
+            reportable.set_quicksend_lookup(Some(super::quicksend::QuickSendFileLookup::for_port(port)));
+        }
         let _ = ready.send(SessionVmReady {
             session_id,
             generation,
@@ -1518,11 +1552,13 @@ async fn handle_command(
         Command::RunSessionScript { session_id, code } => {
             // A fresh VM per run on this session (the per-session registry's
             // only writer); the driver adopts the handle when the session is
-            // still alive and stops the previous one.
+            // still alive and stops the previous one. The port name resolves
+            // here (the VM's apiQuickSendList reads that port's layer).
+            let port = manager.session_port(session_id).await;
             let generation = session_vm_generations.entry(session_id).or_insert(0);
             *generation += 1;
             let generation = *generation;
-            spawn_session_vm(manager, bus.clone(), session_id, code, generation, session_vm_ready);
+            spawn_session_vm(manager, bus.clone(), session_id, port, code, generation, session_vm_ready);
         }
         Command::StopScript => {
             stop_panel_vm(panel_vm);
@@ -1984,7 +2020,8 @@ fn luademo_enabled() -> bool {
 
 /// `RCOM_PLOTDEMO=1|fast`: drive the plot pipeline (issue #24) — the bundled
 /// framed-protocol decoder plus a frame feed on MOCK0 (the demo generator, or
-/// the framed scenario's own timeline when `RCOM_MOCK=framed`). `fast` raises
+/// the framed scenario's own timeline when the mock-mode env var pins framed).
+/// `fast` raises
 /// the generator's rate to fill the 10k-point rings for the render-budget proof.
 fn plotdemo_enabled() -> bool {
     demo::PlotDemoMode::from_env() != demo::PlotDemoMode::Off

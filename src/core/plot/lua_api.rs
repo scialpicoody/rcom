@@ -68,6 +68,18 @@ pub fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
 
+    // apiAddPoint(value, line) — llcom's plot API (parity sweep #26): llcom
+    // numbers its curves 0–9; the shim plots onto the string channel of the
+    // same name, so an llcom decoder's points land on the rcom plot page as
+    // channels "0".."9". The documented rcom surface stays `rcom.ui.*`.
+    globals.set(
+        "apiAddPoint",
+        lua.create_function(|_, (value, line): (f64, i64)| {
+            global_store().add_point(&line.to_string(), value);
+            Ok(())
+        })?,
+    )?;
+
     rcom.set("ui", ui)?;
     Ok(())
 }
@@ -126,6 +138,35 @@ mod tests {
             .expect("series in snapshot");
         assert_eq!(series.points[4].1, 2.5);
         store.clear_channel("rcom-ui-test");
+    }
+
+    /// llcom's `apiAddPoint(value, line)` shim (parity sweep #26) plots onto the
+    /// string channel named by the curve index ("0".."9").
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn llcom_api_add_point_plots_on_the_numbered_channel() {
+        let store = global_store();
+        store.clear_channel("1");
+        let runtime = LuaRuntime::start(
+            EventBus::new(),
+            None,
+            None,
+            r#"
+            apiAddPoint(3.5, 1)
+            apiAddPoint(4.5, 1)
+            "#,
+        )
+        .expect("llcom plot script must run");
+
+        assert!(!runtime.is_stopped());
+        let snapshot = store.sample(1_000_000.0, 100);
+        let series = snapshot
+            .series
+            .iter()
+            .find(|series| series.name == "1")
+            .expect("channel \"1\" created by apiAddPoint");
+        assert_eq!(series.points.len(), 2);
+        assert_eq!(series.points[1].1, 4.5);
+        store.clear_channel("1");
     }
 
     /// A decoder script's `decode(bytes, ts)` is drivable through the runtime

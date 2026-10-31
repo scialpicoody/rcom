@@ -8,6 +8,7 @@
 //! follows encoding switches instead of freezing bytes.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -186,6 +187,56 @@ impl QuickSendStore {
     }
 }
 
+/// The `apiQuickSendList` provider (parity sweep #26): reads the persisted
+/// quick-send profile per call — llcom's script API reads the live panel list;
+/// rcom's panel state lives per tab on the UI thread, and the file is
+/// authoritative after every panel mutation (add/save/delete persist), so the
+/// last-saved profile is the honest cross-thread view. A bound port reads its
+/// override layer, the standalone panel reads the shared default.
+pub struct QuickSendFileLookup {
+    /// The port whose override file to read (`None` = the shared default).
+    port: Option<String>,
+}
+
+impl QuickSendFileLookup {
+    /// The shared-default-profile lookup (the standalone script panel).
+    pub fn global() -> Arc<Self> {
+        Arc::new(Self { port: None })
+    }
+
+    /// The port-override-aware lookup (per-session script VMs).
+    pub fn for_port(port: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self { port: Some(port.into()) })
+    }
+}
+
+/// The pure read behind [`QuickSendFileLookup`]: entry `id` (llcom semantics:
+/// 1-based) over the pages flattened in order; `None` out of range.
+pub fn quick_send_entry(store: &QuickSendStore, id: i64) -> Option<(bool, String)> {
+    if id < 1 {
+        return None;
+    }
+    let mut index = id - 1;
+    for page in &store.pages {
+        if index < page.entries.len() as i64 {
+            let entry = &page.entries[index as usize];
+            return Some((entry.hex, entry.payload.clone()));
+        }
+        index -= page.entries.len() as i64;
+    }
+    None
+}
+
+impl rcom::core::lua::QuickSendLookup for QuickSendFileLookup {
+    fn entry(&self, id: i64) -> Option<(bool, String)> {
+        let store = match &self.port {
+            Some(port) => QuickSendStore::load_for(port),
+            None => QuickSendStore::load(),
+        };
+        quick_send_entry(&store, id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,5 +312,23 @@ mod tests {
         std::fs::remove_file(&path).ok();
         assert_eq!(loaded.pages[0].entries, vec![QuickSendEntry::text("port-only", "x\r\n")]);
         assert_eq!(loaded.pages.len(), PAGE_COUNT);
+    }
+
+    /// The `apiQuickSendList` read (parity sweep #26): 1-based ids over the
+    /// flattened pages, hex flags carried, out-of-range (and `id < 1`) `None` —
+    /// the binding's `""` → head.lua's `nil`.
+    #[test]
+    fn quick_send_entry_flattens_pages_one_based() {
+        let mut store = QuickSendStore::default();
+        store.pages[0].entries = vec![QuickSendEntry::text("a", "one"), QuickSendEntry::hex("b", "0D 0A")];
+        store.pages[1].entries = vec![QuickSendEntry::text("c", "three")];
+
+        assert_eq!(quick_send_entry(&store, 1), Some((false, "one".into())));
+        assert_eq!(quick_send_entry(&store, 2), Some((true, "0D 0A".into())));
+        assert_eq!(quick_send_entry(&store, 3), Some((false, "three".into())));
+        // Page boundaries flatten: page 2's entry follows page 1's.
+        assert_eq!(quick_send_entry(&store, 4), None);
+        assert_eq!(quick_send_entry(&store, 0), None);
+        assert_eq!(quick_send_entry(&store, -3), None);
     }
 }

@@ -72,7 +72,7 @@ use ferroui_base::{
     FerroObjectImpl, Point, Rect, Ref, Size, StyledElement, StyledElementImpl, VisualImpl,
 };
 use ferroui_controls::{
-    Border, Button, CheckBox, ComboBox, ContentControl, Control, ControlImpl, Grid, ListBox,
+    Button, CheckBox, ComboBox, ContentControl, Control, ControlImpl, Grid, ListBox,
     StackPanel, TabItem, TextBlock,
 };
 

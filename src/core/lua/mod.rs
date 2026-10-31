@@ -29,7 +29,7 @@ pub mod sandbox;
 pub mod scripts;
 
 pub use hook::{TxHook, run_send_convert};
-pub use runtime::{DetachedSink, LuaRuntime, UartSink};
+pub use runtime::{DetachedSink, LuaRuntime, QuickSendLookup, UartSink};
 
 #[cfg(test)]
 mod spike {
