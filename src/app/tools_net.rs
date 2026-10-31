@@ -75,6 +75,7 @@ impl NetPage {
         self.send_button.set_content(Some(Rc::new(t!("net_send").to_string())));
         self.status.set_text(Some(&t!("net_idle")));
 
+        self.protocol.set_selected_index(-1);
         let protocols = self.protocol.items();
         protocols.clear();
         for protocol in NetProtocol::all() {
@@ -88,6 +89,7 @@ impl NetPage {
         }
         self.protocol.set_selected_index(0);
 
+        self.mode.set_selected_index(-1);
         let modes = self.mode.items();
         modes.clear();
         for mode in [NetMode::Client, NetMode::Server] {
@@ -120,7 +122,7 @@ impl NetPage {
     /// current one.
     fn toggle_start(&self) {
         let Some(hub) = hub::global() else {
-            self.set_status(t!("net_failed", error = "net hub unavailable").to_string());
+            self.set_status(t!("net_failed", error = t!("net_hub_unavailable").to_string()).to_string());
             return;
         };
         if let Some(channel) = self.channel.get() {
@@ -227,7 +229,7 @@ impl NetPage {
                     t!("net_listening", local = local.to_string()),
                     id = net.channel_id,
                     proto = net.protocol.label(),
-                    mode = net.mode.label(),
+                    mode = mode_label(net.mode),
                 ));
             }
             NetEventKind::Connected { remote } => {
@@ -239,7 +241,7 @@ impl NetPage {
                     t!("net_connected", remote = remote.to_string()),
                     id = net.channel_id,
                     proto = net.protocol.label(),
-                    mode = net.mode.label(),
+                    mode = mode_label(net.mode),
                 ));
             }
             NetEventKind::Error { message } => {
@@ -255,7 +257,7 @@ impl NetPage {
                     t!("net_closed"),
                     id = net.channel_id,
                     proto = net.protocol.label(),
-                    mode = net.mode.label(),
+                    mode = mode_label(net.mode),
                 ));
                 if mine {
                     self.running.set(false);
@@ -336,6 +338,16 @@ pub fn apply_net(net: NetEvent) {
     });
 }
 
+/// Re-applies the locale strings after a language switch (the settings page's
+/// live apply — ticket #25).
+pub fn apply_strings() {
+    PAGE.with(|cell| {
+        if let Some(page) = cell.borrow().as_ref() {
+            page.apply_ui_strings();
+        }
+    });
+}
+
 /// The row a net event renders as in the main log view: the tools' traffic
 /// appears in the session log (the page keeps its own, richer list).
 pub fn format_net_row(net: &NetEvent) -> String {
@@ -345,21 +357,21 @@ pub fn format_net_row(net: &NetEvent) -> String {
             "{stamp}  ==  [net#{id} {proto} {mode}] {detail}",
             id = net.channel_id,
             proto = net.protocol.label(),
-            mode = net.mode.label(),
+            mode = mode_label(net.mode),
             detail = t!("net_listening", local = local.to_string()),
         ),
         NetEventKind::Connected { remote } => format!(
             "{stamp}  ==  [net#{id} {proto} {mode}] {detail}",
             id = net.channel_id,
             proto = net.protocol.label(),
-            mode = net.mode.label(),
+            mode = mode_label(net.mode),
             detail = t!("net_connected", remote = remote.to_string()),
         ),
         NetEventKind::Disconnected { .. } => format!(
             "{stamp}  ==  [net#{id} {proto} {mode}] {detail}",
             id = net.channel_id,
             proto = net.protocol.label(),
-            mode = net.mode.label(),
+            mode = mode_label(net.mode),
             detail = t!("net_closed"),
         ),
         NetEventKind::Error { message } => format!(
@@ -370,6 +382,16 @@ pub fn format_net_row(net: &NetEvent) -> String {
         NetEventKind::Data { direction, remote, bytes } => {
             format!("{stamp}  {}", format_net_data_row(net.channel_id, *direction, *remote, bytes))
         }
+    }
+}
+
+/// The mode's label for the row tags (`[net#3 TCP client]`), localized —
+/// the sweep translates even the tag prose (the protocol names stay proper
+/// nouns).
+fn mode_label(mode: NetMode) -> String {
+    match mode {
+        NetMode::Client => t!("net_mode_client").to_string(),
+        NetMode::Server => t!("net_mode_server").to_string(),
     }
 }
 
@@ -418,7 +440,10 @@ mod tests {
     #[test]
     fn net_rows_render_lifecycle_and_data() {
         let row = format_net_row(&event(NetEventKind::Connected { remote: "[::1]:80".parse().unwrap() }));
-        assert!(row.contains("[net#3 TCP client]"), "{row}");
+        assert!(
+            row.contains(&format!("[net#3 TCP {}]", t!("net_mode_client"))),
+            "{row}"
+        );
         assert!(row.contains("[::1]:80"), "{row}");
 
         let row = format_net_row(&event(NetEventKind::Disconnected { reason: None }));
@@ -427,6 +452,13 @@ mod tests {
         let row = format_net_row(&event(NetEventKind::Error { message: "boom".into() }));
         assert!(row.contains("!!"), "{row}");
         assert!(row.contains("boom"), "{row}");
+    }
+
+    /// The row-tag mode label is localized (the sweep): en reads "client".
+    #[test]
+    fn mode_label_is_localized() {
+        assert_eq!(mode_label(NetMode::Client), t!("net_mode_client").to_string());
+        assert_eq!(mode_label(NetMode::Server), t!("net_mode_server").to_string());
     }
 
     /// The data preview truncates long payloads and escapes line breaks.

@@ -99,6 +99,7 @@ impl MqttPage {
         self.status.set_text(Some(&t!("mqtt_idle")));
 
         for selector in [&self.sub_qos, &self.pub_qos] {
+            selector.set_selected_index(-1);
             let items = selector.items();
             items.clear();
             for qos in MqttQos::all() {
@@ -130,7 +131,7 @@ impl MqttPage {
     /// stops the current one.
     fn toggle_connect(&self) {
         let Some(mqtt) = hub::global() else {
-            self.set_status(t!("mqtt_failed", error = "mqtt hub unavailable").to_string());
+            self.set_status(t!("mqtt_failed", error = t!("mqtt_hub_unavailable").to_string()).to_string());
             return;
         };
         if let Some(session) = self.session.get() {
@@ -240,7 +241,7 @@ impl MqttPage {
             let Some(topic) = topic else {
                 self.append_page_row(format!(
                     "!! {}",
-                    t!("mqtt_start_failed", error = "bridge topic is empty")
+                    t!("mqtt_start_failed", error = t!("mqtt_bridge_topic_empty").to_string())
                 ));
                 self.bridge.set_is_checked(Some(false));
                 return;
@@ -455,6 +456,16 @@ pub fn apply_mqtt(mqtt: MqttEvent) {
     });
 }
 
+
+/// Re-applies the locale strings after a language switch (the settings page's
+/// live apply — ticket #25).
+pub fn apply_strings() {
+    PAGE.with(|cell| {
+        if let Some(page) = cell.borrow().as_ref() {
+            page.apply_ui_strings();
+        }
+    });
+}
 /// The row an MQTT event renders as in the main log view: the tool's traffic
 /// appears in the session log (the page keeps its own, richer list).
 pub fn format_mqtt_row(mqtt: &MqttEvent) -> String {

@@ -44,10 +44,17 @@ pub fn backoff_delay(attempt: u32) -> Duration {
     doubled.min(BACKOFF_MAX)
 }
 
+/// The detail strings the machine publishes (the UI render layer localizes
+/// these two known values; ticket #25's sweep keeps core strings English-only
+/// data and translates at the render boundary).
+pub const DETAIL_WATCHING: &str = "waiting for the port to reappear (auto-reconnect)";
+pub const DETAIL_RECONNECTED: &str = "auto-reconnected";
+
 /// The identity of a port: its OS name plus USB VID/PID when the OS reports them
 /// (design.md: "Port identity = name + VID/PID"). Ports without USB identity (the
 /// mock, or a non-USB serial device) are identified by name alone.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+
 pub struct PortIdentity {
     pub name: String,
     pub vid: Option<u16>,
@@ -188,7 +195,7 @@ impl ReconnectMachine {
             port.session_id,
             &port.port,
             PortState::WatchDesired,
-            Some("waiting for the port to reappear (auto-reconnect)".into()),
+            Some(DETAIL_WATCHING.into()),
             None,
         );
         Phase::Watching {
@@ -244,7 +251,7 @@ impl ReconnectMachine {
                     new_id,
                     &desired.name,
                     PortState::Reopened,
-                    Some("auto-reconnected".into()),
+                    Some(DETAIL_RECONNECTED.into()),
                     Some(config.baud_rate),
                 );
                 Phase::Armed { desired, config }

@@ -38,6 +38,23 @@ pub fn sample_by_name(name: &str) -> Option<&'static SampleScript> {
     SAMPLES.iter().find(|sample| sample.name == name)
 }
 
+/// The i18n keys of the samples' picker names (the sample `name`s are stable
+/// internal identifiers; what the pickers display is translated — ticket #25's
+/// sweep).
+const SAMPLE_KEYS: [&str; 3] = ["sample_llcom_readme", "sample_tx_hook", "sample_framed_decoder"];
+
+/// The displayed (translated) name of sample `index`; falls back to the
+/// internal name when a sample has no key.
+pub fn sample_display_name(index: usize) -> String {
+    match SAMPLE_KEYS.get(index) {
+        Some(key) => rust_i18n::t!(*key).to_string(),
+        None => SAMPLES
+            .get(index)
+            .map(|sample| sample.name.to_string())
+            .unwrap_or_default(),
+    }
+}
+
 /// The scripts directory (`<config>/rcom/scripts`), when the platform provides a
 /// config dir.
 pub fn scripts_dir() -> Option<PathBuf> {
@@ -183,5 +200,18 @@ mod tests {
             assert!(sample_by_name(sample.name).is_some());
         }
         assert!(sample_by_name("nope").is_none());
+    }
+
+    /// Every sample's display name resolves through the dictionaries (ticket
+    /// #25's sweep: the pickers show the translated names, not raw data).
+    #[test]
+    fn samples_have_display_names() {
+        for (index, key) in ["sample_llcom_readme", "sample_tx_hook", "sample_framed_decoder"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(sample_display_name(index), rust_i18n::t!(*key).to_string());
+        }
+        assert_eq!(sample_display_name(999), "");
     }
 }

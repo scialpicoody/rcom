@@ -78,6 +78,9 @@ impl MonitorPage {
     /// The upstream selector: the loopback entry first, then the ports the
     /// backend lists right now (the same listing the main toolbar shows).
     fn fill_upstream_selector(&self) {
+        // Deselect first: clearing a selector's items while it has a selection
+        // panics in the pin's selection model (same guard as the settings page).
+        self.upstream.set_selected_index(-1);
         let items = self.upstream.items();
         items.clear();
         let mut value: BoxedValue = Rc::new(t!("monitor_upstream_loopback").to_string());
@@ -125,7 +128,7 @@ impl MonitorPage {
     /// current one.
     fn toggle_start(&self) {
         let Some(hub) = hub::global() else {
-            self.set_status(t!("monitor_failed", error = "monitor hub unavailable").to_string());
+            self.set_status(t!("monitor_failed", error = t!("monitor_hub_unavailable").to_string()).to_string());
             return;
         };
         if let (Some(monitor), true) = (self.monitor.get(), self.running.get()) {
@@ -183,7 +186,7 @@ impl MonitorPage {
                     t!(
                         "monitor_started",
                         port = virtual_port,
-                        upstream = upstream
+                        upstream = localize_upstream(upstream)
                     ),
                     id = monitor.monitor_id,
                 ));
@@ -276,6 +279,27 @@ pub fn apply_monitor(monitor: MonitorEvent) {
     });
 }
 
+/// Re-applies the locale strings after a language switch (the settings page's
+/// live apply — ticket #25).
+pub fn apply_strings() {
+    PAGE.with(|cell| {
+        if let Some(page) = cell.borrow().as_ref() {
+            page.apply_ui_strings();
+        }
+    });
+}
+
+/// The sweep (ticket #25): the core publishes the loopback upstream's English
+/// label as data; the render boundary translates the known one and passes
+/// real-port labels (`/dev/ttyUSB0 @ 115200` — locale-neutral) through.
+fn localize_upstream(upstream: &str) -> String {
+    if upstream == Upstream::VirtualLoopback.label() {
+        t!("monitor_upstream_loopback").to_string()
+    } else {
+        upstream.to_string()
+    }
+}
+
 /// The row a monitor event renders as in the main log view: the relay's
 /// traffic appears in the session log (the page keeps its own, richer list).
 pub fn format_monitor_row(monitor: &MonitorEvent) -> String {
@@ -284,7 +308,7 @@ pub fn format_monitor_row(monitor: &MonitorEvent) -> String {
         MonitorEventKind::Started { virtual_port, upstream } => format!(
             "{stamp}  ==  [mon#{id}] {detail}",
             id = monitor.monitor_id,
-            detail = t!("monitor_started", port = virtual_port, upstream = upstream),
+            detail = t!("monitor_started", port = virtual_port, upstream = localize_upstream(upstream)),
         ),
         MonitorEventKind::Stopped { .. } => format!(
             "{stamp}  ==  [mon#{id}] {detail}",
@@ -401,5 +425,16 @@ mod tests {
             Upstream::Real { port: "/dev/ttyUSB0".into(), baud: 115_200 }.label(),
             "/dev/ttyUSB0 @ 115200"
         );
+    }
+
+    /// The upstream label localizes at the render boundary (the sweep): the
+    /// core's English loopback label translates, real-port labels pass through.
+    #[test]
+    fn upstream_labels_localize() {
+        assert_eq!(
+            localize_upstream(&Upstream::VirtualLoopback.label()),
+            t!("monitor_upstream_loopback").to_string()
+        );
+        assert_eq!(localize_upstream("/dev/ttyUSB0 @ 115200"), "/dev/ttyUSB0 @ 115200");
     }
 }
