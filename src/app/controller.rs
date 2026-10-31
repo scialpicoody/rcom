@@ -192,6 +192,8 @@ impl MainController {
         super::tools_mqtt::attach(element);
         // ISSUE #24 (one insertion point): the plot page of the bottom pane.
         super::tools_plot::attach(element);
+        // ISSUE #23 (one insertion point): the serial monitor page of the bottom pane.
+        super::tools_monitor::attach(element);
         wire_events(&this);
         start_pump(&this);
         MainController::autodemo_persist_check(&this);
@@ -856,6 +858,8 @@ impl MainController {
             UiMsg::Mqtt(mqtt) => super::tools_mqtt::apply_mqtt(mqtt),
             // ISSUE #24 (one insertion point): the plot page consumes its events.
             UiMsg::Plot(plot) => super::tools_plot::apply_plot(plot),
+            // ISSUE #23 (one insertion point): the monitor page consumes its events.
+            UiMsg::Monitor(monitor) => super::tools_monitor::apply_monitor(monitor),
         }
     }
 

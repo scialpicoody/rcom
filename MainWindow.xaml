@@ -386,6 +386,49 @@
           </StackPanel>
         </Grid>
       </TabItem>
+
+      <!-- The serial monitor page (issue #23). The XAML carries no visible
+           strings — src/app/tools_monitor.rs sets every label from the i18n
+           dictionaries and wires the controls by these names. The virtual port
+           path lives in a read-only TextBox so it stays copyable. -->
+      <TabItem x:Name="MonitorTab">
+        <Grid RowDefinitions="Auto,Auto,*" Margin="4">
+          <!-- Upstream row: target selector + baud + start/stop + status. -->
+          <StackPanel Grid.Row="0"
+                      Orientation="Horizontal"
+                      Spacing="6">
+            <ComboBox x:Name="MonitorUpstreamSelector"
+                      MinWidth="180" />
+            <TextBox x:Name="MonitorBaudBox"
+                     MinWidth="64" />
+            <Button x:Name="MonitorStartButton"
+                    MinWidth="90" />
+            <TextBlock x:Name="MonitorStatus"
+                       FontSize="12"
+                       VerticalAlignment="Center" />
+          </StackPanel>
+
+          <!-- Virtual port row: the copyable path + the platform story. -->
+          <StackPanel Grid.Row="1"
+                      Orientation="Horizontal"
+                      Spacing="6"
+                      Margin="0,6,0,0">
+            <TextBlock x:Name="MonitorPortCaption"
+                       VerticalAlignment="Center"
+                       FontSize="12" />
+            <TextBox x:Name="MonitorPortBox"
+                     MinWidth="190" />
+            <TextBlock x:Name="MonitorModeStory"
+                       FontSize="12"
+                       VerticalAlignment="Center" />
+          </StackPanel>
+
+          <ListBox x:Name="MonitorLog"
+                   Grid.Row="2"
+                   FontSize="12"
+                   Margin="0,6,0,0" />
+        </Grid>
+      </TabItem>
     </TabControl>
   </Grid>
 </Window>

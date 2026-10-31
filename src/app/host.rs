@@ -99,6 +99,9 @@ pub enum UiMsg {
     /// A plot-pipeline event (issue #24); the plot page consumes it and the
     /// row also lands in the main log view.
     Plot(PlotEvent),
+    /// A serial-monitor event (issue #23); the monitor page consumes it and
+    /// the row also lands in the main log view.
+    Monitor(rcom::core::monitor::MonitorEvent),
 }
 
 /// The process-wide handle the UI thread uses to reach the core. `ui_rx` is drained
@@ -171,6 +174,21 @@ fn start_engine() -> CoreHost {
                         driver_bus.clone(),
                         mqtt_hub,
                         Some(Arc::clone(&manager)),
+                    ));
+                }
+                // ISSUE #23: the process-global monitor hub (the pty-pair proxy)
+                // and, when requested, the monitor autodemo (loopback, plain
+                // File I/O on the pty slaves).
+                let monitor_hub = rcom::core::monitor::hub::init_global(
+                    driver_bus.clone(),
+                    Arc::clone(&backend),
+                );
+                if rcom::core::monitor::demo::MonitorDemoMode::from_env()
+                    != rcom::core::monitor::demo::MonitorDemoMode::Off
+                {
+                    tokio::spawn(rcom::core::monitor::demo::run(
+                        driver_bus.clone(),
+                        monitor_hub,
                     ));
                 }
                 driver(
@@ -700,6 +718,19 @@ async fn driver(
                                 break; // UI gone
                             }
                         }
+                        // ISSUE #23: monitor events render one row (relay
+                        // lifecycle + captured traffic) and go to the monitor
+                        // page as their own message.
+                        Event::Monitor(monitor) => {
+                            let row = super::tools_monitor::format_monitor_row(monitor);
+                            tracing::debug!(target: "rcom::rows", "{row}");
+                            if ui.send(UiMsg::Row { text: row, direction: None }).is_err() {
+                                break; // UI gone
+                            }
+                            if ui.send(UiMsg::Monitor(monitor.clone())).is_err() {
+                                break; // UI gone
+                            }
+                        }
                         Event::Port(_) | Event::Log(_) | Event::ScriptOut(_) => {
                             if let Some(row) = render_event(&event) {
                                 tracing::debug!(target: "rcom::rows", "{row}");
@@ -975,6 +1006,7 @@ pub fn render_event(event: &Event) -> Option<String> {
         Event::Net(_) => None,
         Event::Mqtt(_) => None,
         Event::Plot(_) => None,
+        Event::Monitor(_) => None,
     }
 }
 
