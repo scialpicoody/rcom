@@ -66,6 +66,8 @@ struct MqttPage {
     bridge_topic: Ref<TextBox>,
     status: Ref<TextBlock>,
     log: Ref<ListBox>,
+    /// The §4.1 empty-state caption (naming the next action).
+    empty: Ref<TextBlock>,
     /// The MQTT session this page currently drives, if any.
     session: Cell<Option<u64>>,
     /// Whether that session counts as connected-or-connecting (the
@@ -93,6 +95,9 @@ impl MqttPage {
         self.pub_payload.set_placeholder_text(Some(&t!("mqtt_pub_payload_hint")));
         self.bridge_topic.set_placeholder_text(Some(&t!("mqtt_bridge_topic_hint")));
         self.connect.set_content(Some(Rc::new(t!("mqtt_connect").to_string())));
+        // §4.1: one accent primary action + the empty-state caption.
+        super::ui_patterns::accent(&self.connect);
+        self.empty.set_text(Some(&t!("mqtt_empty")));
         self.sub_button.set_content(Some(Rc::new(t!("mqtt_sub").to_string())));
         self.unsub_button.set_content(Some(Rc::new(t!("mqtt_unsub").to_string())));
         self.pub_button.set_content(Some(Rc::new(t!("mqtt_publish").to_string())));
@@ -270,6 +275,8 @@ impl MqttPage {
 
     /// One row into the page's list (capped; the newest visible, auto-scrolled).
     fn append_page_row(&self, text: String) {
+        // First data: the empty caption disappears and never returns (§4.1).
+        self.empty.set_is_visible(false);
         let items = self.log.items();
         if self.log.item_count() >= PAGE_ROW_CAP as i32 {
             items.remove_at(0);
@@ -408,6 +415,7 @@ pub fn attach(element: &Ref<StyledElement>) {
         bridge_topic: NameScopeExtensions::get(element, "MqttBridgeTopicBox"),
         status: NameScopeExtensions::get(element, "MqttStatus"),
         log: NameScopeExtensions::get(element, "MqttLog"),
+        empty: NameScopeExtensions::get(element, "MqttEmpty"),
         session: Cell::new(None),
         running: Cell::new(false),
         subs: RefCell::new(Vec::new()),

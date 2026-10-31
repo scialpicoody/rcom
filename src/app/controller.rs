@@ -105,7 +105,7 @@ pub struct MainController {
     encoding_caption: Ref<TextBlock>,
     // Mock drawer.
     mock_drawer_button: Ref<Button>,
-    mock_drawer: Ref<StackPanel>,
+    mock_drawer: Ref<ferroui_controls::Grid>,
     mock_pause: Ref<Button>,
     mock_step: Ref<Button>,
     mock_speed: Ref<ComboBox>,
@@ -490,64 +490,75 @@ impl MainController {
 
     /// Applies the active VM's presentation state to the shared controls and
     /// re-renders its view. The `syncing` guard keeps the control-event
-    /// handlers (checkbox toggles, selection changes) from re-entering.
+    /// handlers (checkbox toggles, selection changes) from re-entering; the
+    /// state is snapshotted in one borrow scope, then applied (the appliers
+    /// re-borrow the tab).
     fn sync_from_active(&self) {
         self.syncing.set(true);
-        let Some(vm) = self.active_vm() else { return };
-        let vm = vm.borrow();
-
+        let Some(vm) = self.active_vm() else {
+            self.syncing.set(false);
+            return;
+        };
+        let (follow, view_mode, filter, timestamps, hide_sent) = {
+            let vm = vm.borrow();
+            (vm.follow, vm.view_mode, vm.filter.clone(), vm.timestamps, vm.hide_sent)
+        };
         // Log toolbar.
-        self.follow_toggle.set_is_checked(Some(vm.follow));
-        self.view_mode_selector.set_selected_index(vm.view_mode.index());
-        self.filter_box.set_text(Some(&vm.filter));
-        self.timestamps_toggle.set_is_checked(Some(vm.timestamps));
-        self.hide_sent.set_is_checked(Some(vm.hide_sent));
+        self.follow_toggle.set_is_checked(Some(follow));
+        self.view_mode_selector.set_selected_index(view_mode.index());
+        self.filter_box.set_text(Some(&filter));
+        self.timestamps_toggle.set_is_checked(Some(timestamps));
+        self.hide_sent.set_is_checked(Some(hide_sent));
 
         // Chip + banner + open/close.
-        self.set_open_state(vm.state);
-        self.sync_chip_banner();
-        self.open_close.set_is_enabled(!vm.open_pending);
+        let (state, open_pending, encoding, speed_index, quick_page, hook_armed) = {
+            let vm = vm.borrow();
+            (vm.state, vm.open_pending, vm.encoding, vm.mock_speed_index, vm.quick_page, vm.hook_armed)
+        };
+        self.set_open_state(state);
+        self.open_close.set_is_enabled(!open_pending);
 
         // Session toolbar: encoding + the port listing (bound port preselected).
         let encoding_index = TextEncoding::all()
             .iter()
-            .position(|candidate| *candidate == vm.encoding)
+            .position(|candidate| *candidate == encoding)
             .unwrap_or(0) as i32;
         self.encoding_selector.set_selected_index(encoding_index);
         self.show_ports_in_selector();
-        self.mock_speed.set_selected_index(vm.mock_speed_index as i32);
-        self.mock_pause
-            .set_content(Some(Rc::new(if vm.mock_paused { t!("mock_resume").to_string() } else { t!("mock_pause").to_string() })));
-        self.mock_trigger.set_content(Some(Rc::new(
-            if vm.port.as_ref().is_some_and(|info| matches!(info.kind, rcom::core::port::PortKind::Mock(MockScenario::Framed))) {
-                t!("mock_trigger_corrupt").to_string()
-            } else {
-                t!("mock_trigger_unplug").to_string()
-            },
+        self.mock_speed.set_selected_index(speed_index as i32);
+        let (paused, framed, mock, drawer_open) = {
+            let vm = vm.borrow();
+            (
+                vm.mock_paused,
+                vm.port.as_ref().is_some_and(|info| {
+                    matches!(info.kind, rcom::core::port::PortKind::Mock(MockScenario::Framed))
+                }),
+                vm.is_mock(),
+                vm.mock_drawer_open,
+            )
+        };
+        self.mock_pause.set_content(Some(Rc::new(
+            if paused { t!("mock_resume").to_string() } else { t!("mock_pause").to_string() },
         )));
-        let drawer_visible = vm.is_mock();
-        self.mock_drawer_button.set_is_visible(drawer_visible);
-        self.mock_drawer.set_is_visible(drawer_visible && vm.mock_drawer_open);
+        self.mock_trigger.set_content(Some(Rc::new(
+            if framed { t!("mock_trigger_corrupt").to_string() } else { t!("mock_trigger_unplug").to_string() },
+        )));
+        self.mock_drawer_button.set_is_visible(mock);
+        self.mock_drawer.set_is_visible(mock && drawer_open);
 
         // Send bar.
         self.hex_send.set_is_checked(Some(false));
 
         // Quick-send: the tab's own store/page/editing state.
-        self.quick_pager.set_selected_page_index(vm.quick_page as i32);
+        self.quick_pager.set_selected_page_index(quick_page as i32);
         self.update_quick_page_label();
-        let hook_text = vm.hook_armed;
-        drop(vm);
         self.sync_hook_badge();
-        let _ = hook_text;
         MainController::rebuild_quick_entries(self);
 
         // The script page's per-session hook row.
-        let vm = self.active_vm().expect("active tab");
-        let vm = vm.borrow();
-        self.tx_hook_enable.set_is_checked(Some(vm.hook_armed));
+        self.tx_hook_enable.set_is_checked(Some(hook_armed));
 
         // Re-render the log from the model.
-        drop(vm);
         self.render_view();
         self.syncing.set(false);
         self.update_shown_status();
@@ -1230,6 +1241,8 @@ impl MainController {
         this.script_editor
             .set_font_family(ferroui_base::media::FontFamily::new(SCRIPT_EDITOR_FONT));
         this.refresh_script_picker();
+        // §4.1: exactly one accent primary action per page header — Run.
+        ui_patterns::accent(&this.script_run);
         // Destructive-and-irreversible: deleting a saved script is confirmed
         // (§4.1's required list) — button-anchored flyout, one shared builder.
         ui_patterns::confirm_flyout(
@@ -1625,22 +1638,35 @@ impl MainController {
         // reconnect — §6.5's "log continuity").
         if matches!(state, PortState::Open | PortState::Reopened) {
             let pending = self.pending_opens.borrow_mut().remove(&port);
-            let owner = match pending {
-                Some(tab_id) => self
-                    .tabs
-                    .borrow()
-                    .iter()
-                    .find(|vm| vm.borrow().tab_id == tab_id)
-                    .cloned(),
-                None => self
-                    .tabs
-                    .borrow()
-                    .iter()
-                    .find(|vm| {
-                        let vm = vm.borrow();
-                        vm.title == port && !vm.owns_session(session_id)
-                    })
-                    .cloned(),
+            // (Owner lookup snapshots the table in its own borrow scope — the
+            // auto-create below takes a mutable borrow and must not nest.)
+            let owner = {
+                let tabs = self.tabs.borrow();
+                match pending {
+                    Some(tab_id) => tabs.iter().find(|vm| vm.borrow().tab_id == tab_id).cloned(),
+                    // Nobody asked (an autodemo open): a tab already showing
+                    // the port adopts (no duplicate tabs, AC6); else the
+                    // auto-create path below makes one (§3.6).
+                    None => tabs
+                        .iter()
+                        .find(|vm| {
+                            let vm = vm.borrow();
+                            vm.title == port && !vm.owns_session(session_id)
+                        })
+                        .cloned(),
+                }
+            };
+            let owner = match owner {
+                Some(vm) => Some(vm),
+                None => {
+                    // Auto-create only when no tab shows the port at all.
+                    let exists = self.tabs.borrow().iter().any(|vm| vm.borrow().title == port);
+                    if exists {
+                        None
+                    } else {
+                        Some(self.add_tab())
+                    }
+                }
             };
             if let Some(vm) = owner {
                 let flush_hook = {

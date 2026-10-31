@@ -501,10 +501,18 @@
                     MinWidth="70" />
           </StackPanel>
 
-          <ListBox x:Name="NetLog"
-                   Grid.Row="4"
-                   FontSize="12"
-                   Margin="0,6,0,0" />
+          <Grid Grid.Row="4" Margin="0,6,0,0">
+            <ListBox x:Name="NetLog"
+                     FontSize="12" />
+            <TextBlock x:Name="NetEmpty"
+                       FontSize="12"
+                       Opacity="0.6"
+                       TextAlignment="Center"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Margin="16,8,16,8"
+                       TextWrapping="Wrap" />
+          </Grid>
         </Grid>
       </TabItem>
 
@@ -582,10 +590,18 @@
                        VerticalAlignment="Center" />
           </StackPanel>
 
-          <ListBox x:Name="MqttLog"
-                   Grid.Row="4"
-                   FontSize="12"
-                   Margin="0,6,0,0" />
+          <Grid Grid.Row="4" Margin="0,6,0,0">
+            <ListBox x:Name="MqttLog"
+                     FontSize="12" />
+            <TextBlock x:Name="MqttEmpty"
+                       FontSize="12"
+                       Opacity="0.6"
+                       TextAlignment="Center"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Margin="16,8,16,8"
+                       TextWrapping="Wrap" />
+          </Grid>
         </Grid>
       </TabItem>
 
@@ -616,10 +632,20 @@
                        VerticalAlignment="Center" />
           </StackPanel>
 
-          <!-- The custom plot control lands here (added in code). -->
+          <!-- The custom plot control lands here (added in code); the
+               empty-state caption sits beneath it until data arrives. -->
           <Grid x:Name="PlotHost"
                 Grid.Row="1"
-                Margin="0,6,0,0" />
+                Margin="0,6,0,0">
+            <TextBlock x:Name="PlotEmpty"
+                       FontSize="12"
+                       Opacity="0.6"
+                       TextAlignment="Center"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Margin="16,8,16,8"
+                       TextWrapping="Wrap" />
+          </Grid>
 
           <StackPanel Grid.Row="2"
                       Orientation="Horizontal"
@@ -678,10 +704,18 @@
                        VerticalAlignment="Center" />
           </StackPanel>
 
-          <ListBox x:Name="MonitorLog"
-                   Grid.Row="2"
-                   FontSize="12"
-                   Margin="0,6,0,0" />
+          <Grid Grid.Row="2" Margin="0,6,0,0">
+            <ListBox x:Name="MonitorLog"
+                     FontSize="12" />
+            <TextBlock x:Name="MonitorEmpty"
+                       FontSize="12"
+                       Opacity="0.6"
+                       TextAlignment="Center"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Margin="16,8,16,8"
+                       TextWrapping="Wrap" />
+          </Grid>
         </Grid>
       </TabItem>
 

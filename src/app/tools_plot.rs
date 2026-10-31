@@ -43,6 +43,9 @@ struct PlotPage {
     pause: Ref<CheckBox>,
     clear: Ref<Button>,
     status: Ref<TextBlock>,
+    /// The §4.1 empty-state caption (the §4.7 promotion of the idle status
+    /// copy into the plot area; hidden once the decoder renders).
+    empty: Ref<TextBlock>,
     host: Ref<Grid>,
     window_caption: Ref<TextBlock>,
     zoom_out: Ref<Button>,
@@ -69,6 +72,25 @@ impl PlotPage {
         self.stop.set_content(Some(Rc::new(t!("plot_stop").to_string())));
         self.pause.set_content(Some(Rc::new(t!("plot_pause").to_string())));
         self.clear.set_content(Some(Rc::new(t!("plot_clear").to_string())));
+        // §4.1: one accent primary action; the plot area's empty caption is
+        // the idle-status copy promoted (§4.7).
+        super::ui_patterns::accent(&self.start);
+        self.empty.set_text(Some(&t!("plot_status_idle")));
+        // Clear is destructive on a long capture: the §4.1 confirm flyout
+        // (the click resolves the page through the thread-local — it is set
+        // right after apply_ui_strings returns).
+        super::ui_patterns::confirm_flyout(
+            &self.clear,
+            t!("confirm_clear_plot").to_string(),
+            "clear",
+            || {
+                PAGE.with(|page| {
+                    if let Some(page) = page.borrow().as_ref() {
+                        page.clear_plot();
+                    }
+                });
+            },
+        );
         self.window_caption.set_text(Some(&t!("plot_window")));
         self.zoom_in.set_content(Some(Rc::new(t!("plot_zoom_in").to_string())));
         self.zoom_out.set_content(Some(Rc::new(t!("plot_zoom_out").to_string())));
@@ -158,9 +180,11 @@ impl PlotPage {
         global_store().set_paused(paused);
     }
 
-    /// Clear drops every channel's points (the rings stay).
+    /// Clear drops every channel's points (the rings stay) — confirmed via
+    /// the flyout (a long capture is real work, §4.7).
     fn clear_plot(&self) {
         global_store().clear();
+        self.set_status(t!("plot_status_cleared").to_string());
     }
 
     /// The zoom buttons halve/double the rendered time window (the wheel on
@@ -184,6 +208,7 @@ impl PlotPage {
         match &plot.kind {
             PlotEventKind::DecoderStarted { name } => {
                 self.set_status(t!("plot_status_running", name = name).to_string());
+                self.empty.set_is_visible(false);
             }
             PlotEventKind::DecoderStopped { .. } => {
                 self.set_status(t!("plot_status_stopped").to_string());
@@ -227,6 +252,7 @@ pub fn attach(element: &Ref<StyledElement>) {
         pause: NameScopeExtensions::get(element, "PlotPauseCheck"),
         clear: NameScopeExtensions::get(element, "PlotClearButton"),
         status: NameScopeExtensions::get(element, "PlotStatus"),
+        empty: NameScopeExtensions::get(element, "PlotEmpty"),
         host: NameScopeExtensions::get(element, "PlotHost"),
         window_caption: NameScopeExtensions::get(element, "PlotWindowCaption"),
         zoom_out: NameScopeExtensions::get(element, "PlotZoomOutButton"),

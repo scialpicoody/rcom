@@ -5,14 +5,14 @@
 
 use std::rc::Rc;
 
-use ferroui_base::layout::{Orientation, VerticalAlignment};
-use ferroui_base::media::{FontWeight, SolidColorBrush, TextAlignment, TextWrapping};
+use ferroui_base::layout::Orientation;
+use ferroui_base::media::TextWrapping;
 use ferroui_base::threading::DispatcherTimer;
 use ferroui_base::reactive::IDisposable;
-use ferroui_base::{CornerRadius, Ref, Thickness};
+use ferroui_base::Ref;
 use ferroui_controls::notifications::{Notification, NotificationType, WindowNotificationManager};
 use ferroui_controls::primitives::HeaderedContentControl;
-use ferroui_controls::{Border, Button, Control, Flyout, ProgressBar, StackPanel, TabItem, TextBlock, TopLevel};
+use ferroui_controls::{Button, Control, Flyout, ProgressBar, StackPanel, TabItem, TextBlock, TopLevel};
 
 use rust_i18n::t;
 
@@ -99,12 +99,6 @@ impl Notifier {
         self.show(NotificationType::Information, title, message);
     }
 
-    /// Shows a warning notification (page-scoped async errors while the page
-    /// is not selected).
-    pub fn warn(&self, title: &str, message: &str) {
-        self.show(NotificationType::Warning, title, message);
-    }
-
     fn show(&self, type_: NotificationType, title: &str, message: &str) {
         let notification = Notification::new(
             Some(title.to_string()),
@@ -152,40 +146,3 @@ impl Drop for OpenProgressGuard {
     }
 }
 
-/// The dim empty-state caption of a page (§4.1): one line naming the next
-/// action, centered in the content area. Returns the TextBlock for the caller
-/// to place; `set_empty_caption` toggles it.
-pub fn empty_caption() -> Ref<TextBlock> {
-    let caption = TextBlock::new();
-    caption.set_font_size(12.0);
-    caption.set_opacity(0.6);
-    caption.set_text_alignment(TextAlignment::Center);
-    caption.set_horizontal_alignment(ferroui_base::layout::HorizontalAlignment::Center);
-    caption.set_vertical_alignment(VerticalAlignment::Center);
-    caption.set_text_wrapping(TextWrapping::Wrap);
-    caption.set_margin(Thickness::new(16.0, 8.0, 16.0, 8.0));
-    caption
-}
-
-/// A translucent status chip (the session state chip): rounded, padded, with
-/// the label TextBlock inside.
-pub fn chip(background: ferroui_base::media::Color, foreground: ferroui_base::media::Color) -> (Ref<Border>, Ref<TextBlock>) {
-    let border = Border::new();
-    border.set_corner_radius(CornerRadius::uniform(3.0));
-    border.set_padding(Thickness::new(8.0, 1.0, 8.0, 1.0));
-    border.set_vertical_alignment(VerticalAlignment::Center);
-    border.set_value(
-        Border::background_property(),
-        Some(SolidColorBrush::with_color(background).into()),
-    );
-    let text = TextBlock::new();
-    text.set_font_size(11.0);
-    text.set_font_weight(FontWeight::SemiBold);
-    text.set_value(
-        TextBlock::foreground_property(),
-        Some(ferroui_base::media::SolidColorBrush::with_color(foreground).into()),
-    );
-    let child = text.clone();
-    border.set_child(Some(child.upcast::<Control>()));
-    (border, text)
-}

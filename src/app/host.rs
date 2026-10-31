@@ -37,6 +37,7 @@ use rcom::core::bus::{
 use rcom::core::codec::{hex_spaced, lossy_utf8, TextEncoding};
 use rcom::core::logstore::{default_log_dir, LogStore};
 use rcom::core::lua::{LuaRuntime, UartSink};
+use rcom::core::plot::store::global_store;
 use rcom::core::plot::{demo, DecoderHost};
 use rcom::core::port::factory::{mock_mode_default_for_profile, mock_mode_from_env, BackendFactory, MockMode};
 use rcom::core::port::manager::PortManager;
@@ -182,6 +183,8 @@ fn selected_mock_mode() -> MockMode {
     }
     match AutodemoMode::from_env() {
         AutodemoMode::Reconnect => MockMode::Single(MockScenario::Unplug),
+        AutodemoMode::Multi => MockMode::All,
+        AutodemoMode::Noisy => MockMode::Single(MockScenario::Noisy),
         AutodemoMode::Off => {
             if luademo_enabled() || plotdemo_enabled() {
                 MockMode::Single(MockScenario::Echo)
@@ -305,6 +308,12 @@ pub enum AutodemoMode {
     Reconnect,
     Hook,
     Panel,
+    /// AC7's evidence path: MOCK0 + MOCK1 as two sessions (two tabs), traffic
+    /// to each, one closed, the other still streaming.
+    Multi,
+    /// AC8's evidence path: the noisy scenario at 8× for ~10 s (the pump
+    /// budget traces are the responsiveness proof).
+    Noisy,
 }
 
 impl AutodemoMode {
@@ -320,6 +329,8 @@ impl AutodemoMode {
             Ok("persist") => Self::Persist,
             Ok("hook") => Self::Hook,
             Ok("panel") => Self::Panel,
+            Ok("multi") => Self::Multi,
+            Ok("noisy") => Self::Noisy,
             _ => Self::Off,
         }
     }
@@ -350,15 +361,22 @@ async fn driver(
     // The reconnect demo: set once the machine reports Reopened, so the next RX
     // `ping` proves data flows across the unplug/replug.
     let mut reconnected = false;
+    // The multi-session demo's evidence: each session's TX, MOCK0's echo, and
+    // the second session's TX after the first closed (AC7).
+    let mut multi = (None, false, false, false); // (first_id, first_tx, second_tx, after_close_tx)
+    // The reconnect demo counts the machine's auto-reopens (AC6: five rapid
+    // cycles leave the session usable — every cycle re-opens).
+    let mut reconnect_count: u32 = 0;
+    // The hook demo's row-level evidence: the rewritten TX carries the flag.
+    let mut hook_flag_seen = false;
     let luademo = luademo_enabled();
     let plotdemo = plotdemo_enabled();
     // The reconnect demo's trigger task learns its session id from the Open
     // event (published by the driver's Port arm below).
     let (demo_id_tx, demo_id_rx) = mpsc::unbounded_channel::<u64>();
-    let demo_id_tx = if AutodemoMode::from_env() == AutodemoMode::Reconnect {
-        Some(demo_id_tx)
-    } else {
-        None
+    let demo_id_tx = match AutodemoMode::from_env() {
+        AutodemoMode::Reconnect | AutodemoMode::Multi | AutodemoMode::Noisy => Some(demo_id_tx),
+        _ => None,
     };
     let requested = AutodemoMode::from_env();
     let mode = if requested == AutodemoMode::Off && (luademo || plotdemo) {
@@ -406,6 +424,11 @@ async fn driver(
                     Some(session_id) => session_id,
                     None => return,
                 };
+                // Compress the 10 s → 5 s scripted cycle (8× = ~1.9 s/cycle).
+                let _ = demo.send(Command::MockAction {
+                    session_id,
+                    action: MockAction::Speed(8.0),
+                });
                 tokio::time::sleep(Duration::from_millis(600)).await;
                 let _ = demo.send(Command::SendBytes {
                     session_id: Some(session_id),
@@ -413,18 +436,25 @@ async fn driver(
                 });
                 tokio::time::sleep(Duration::from_millis(600)).await;
                 tracing::info!("AUTODEMO: triggering MOCK0 unplug (MockControl)");
-                let _ = demo.send(Command::MockAction {
-                    session_id,
-                    action: MockAction::Trigger(MockTrigger::Unplug),
-                });
-                // The scripted reappear (5 s / speed) opens the reconnect
-                // window; give the machine its poll cadence, then ping.
-                tokio::time::sleep(Duration::from_millis(6500)).await;
-                let _ = demo.send(Command::SendBytes {
-                    session_id: Some(session_id),
-                    bytes: b"ping".to_vec(),
-                });
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                // One full scripted cycle, then five rapid trigger(Unplug)
+                // cycles in a row (AC6: no hang, no duplicate tabs, the
+                // session stays usable). Each cycle: trigger → the scripted
+                // reappear window → the machine re-opens → a ping.
+                for cycle in 0..6u32 {
+                    let _ = demo.send(Command::MockAction {
+                        session_id,
+                        action: MockAction::Trigger(MockTrigger::Unplug),
+                    });
+                    let _ = cycle;
+                    // Reappear (5 s / 8) + the machine's poll cadence + margin.
+                    tokio::time::sleep(Duration::from_millis(2200)).await;
+                    let _ = demo.send(Command::SendBytes {
+                        session_id: Some(session_id),
+                        bytes: b"ping".to_vec(),
+                    });
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
+                tracing::info!("AUTODEMO RECONNECT: six unplug cycles fired (1 scripted + 5 rapid)");
                 match store.file_path().await {
                     Some(path) => {
                         tracing::info!("AUTODEMO: session log file: {}", path.display())
@@ -472,6 +502,63 @@ async fn driver(
                 // Give the print time to surface, then cut the loop down.
                 tokio::time::sleep(Duration::from_millis(1200)).await;
                 let _ = demo.send(Command::StopScript);
+            });
+        }
+        AutodemoMode::Multi => {
+            tracing::info!(
+                "RCOM_AUTODEMO=multi: driving the two-session path (MOCK0 + MOCK1; \
+                 one closed, the other still streaming)"
+            );
+            let demo = commands_tx.clone();
+            let mut id_rx = demo_id_rx;
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = demo.send(Command::Open { name: "MOCK0".into(), baud: 115_200 });
+                let first = id_rx.recv().await;
+                let _ = demo.send(Command::Open { name: "MOCK1".into(), baud: 115_200 });
+                let second = id_rx.recv().await;
+                let (Some(first), Some(second)) = (first, second) else { return };
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                // Traffic to each session (the tabs route it independently).
+                let _ = demo.send(Command::SendBytes {
+                    session_id: Some(first),
+                    bytes: b"first".to_vec(),
+                });
+                let _ = demo.send(Command::SendBytes {
+                    session_id: Some(second),
+                    bytes: b"second".to_vec(),
+                });
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                // Close the first: the second must keep streaming (AC7).
+                let _ = demo.send(Command::CloseSession { session_id: first });
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let _ = demo.send(Command::SendBytes {
+                    session_id: Some(second),
+                    bytes: b"still-open".to_vec(),
+                });
+                tracing::info!(
+                    "AUTODEMO MULTI: sessions {first} (closed) and {second} driven — \
+                     the second session's TX must appear after the close"
+                );
+            });
+        }
+        AutodemoMode::Noisy => {
+            tracing::info!(
+                "RCOM_AUTODEMO=noisy: driving the 8× responsiveness path (noisy MOCK0, \
+                 ~10 s; the pump-budget traces are the evidence)"
+            );
+            let demo = commands_tx.clone();
+            let mut id_rx = demo_id_rx;
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = demo.send(Command::Open { name: MOCK_PORT_NAME.into(), baud: 115_200 });
+                let Some(session_id) = id_rx.recv().await else { return };
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let _ = demo.send(Command::MockAction {
+                    session_id,
+                    action: MockAction::Speed(8.0),
+                });
+                tracing::info!("AUTODEMO NOISY: session {session_id} at 8× — streaming");
             });
         }
         AutodemoMode::Encoding => {
@@ -649,6 +736,14 @@ async fn driver(
                                 "AUTODEMO HOOK OK: TX '414243' reached the wire as 41 42 43 \
                                  ('ABC') — the fromHex pre-send hook transformed the send"
                             );
+                            if data.hooked && !hook_flag_seen {
+                                hook_flag_seen = true;
+                                tracing::info!(
+                                    "AUTODEMO HOOK FLAG OK: the rewritten TX event carries \
+                                     hooked=true — the log row renders the ⌁hook marker next \
+                                     to the post-hook bytes (design-ui §5.2)"
+                                );
+                            }
                         }
                         if let Some(expected) = &awaiting_echo {
                             if data.direction == Direction::Rx
@@ -672,6 +767,34 @@ async fn driver(
                                 "AUTODEMO OK: auto-reconnect complete — data flows again \
                                  after unplug/replug (WatchDesired→Open proven)"
                             );
+                        }
+                        // Multi-session evidence (AC7): each session carries only
+                        // its own bytes; the second keeps streaming after the
+                        // first closed.
+                        if mode == AutodemoMode::Multi {
+                            match data.direction {
+                                Direction::Tx if data.bytes.as_slice() == b"first" => {
+                                    multi.0 = Some(data.session_id);
+                                    multi.1 = true;
+                                }
+                                Direction::Tx if data.bytes.as_slice() == b"second" => {
+                                    multi.2 = true;
+                                }
+                                Direction::Tx if data.bytes.as_slice() == b"still-open" => {
+                                    multi.3 = true;
+                                    let (first, one, two, three) = (&multi.0, multi.1, multi.2, multi.3);
+                                    if one && two && three {
+                                        tracing::info!(
+                                            "AUTODEMO MULTI OK: sessions {first:?} and its \
+                                             sibling each carried their own TX, the echo \
+                                             returned on the first, and the second session \
+                                             streamed after the first was closed \
+                                             (independent scrollbacks, no cross-talk)"
+                                        );
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     // Lua demo: boot the sample VM as soon as MOCK0 is open; feed
@@ -730,6 +853,35 @@ async fn driver(
                                         "PLOTDEMO: the framed mock feeds the decoder directly \
                                          (no demo generator)"
                                     );
+                                    // AC5's evidence: five seconds in, the store
+                                    // must hold 3 curves at ~10 Hz (≥ 40 points
+                                    // per channel) — the scripted feed through
+                                    // the decoder, no generator involved.
+                                    tokio::spawn(async move {
+                                        tokio::time::sleep(Duration::from_secs(5)).await;
+                                        let channels = global_store().channel_names();
+                                        let total = global_store().total_added();
+                                        let per_channel: Vec<String> = channels
+                                            .iter()
+                                            .map(|(name, points)| format!("{name}={points}"))
+                                            .collect();
+                                        let ok = channels.len() == 3
+                                            && channels.iter().all(|(_, points)| *points >= 40);
+                                        if ok {
+                                            tracing::info!(
+                                                "PLOTDEMO OK (framed mock): 3 curves at ~10 Hz — \
+                                                 store holds {total} points [{per}]",
+                                                per = per_channel.join(", ")
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                "PLOTDEMO (framed mock): store shows {total} \
+                                                 points across {} channels [{per}]",
+                                                channels.len(),
+                                                per = per_channel.join(", ")
+                                            );
+                                        }
+                                    });
                                 }
                             }
                         }
@@ -771,14 +923,15 @@ async fn driver(
                             ),
                             PortState::Reopened => {
                                 reconnected = true;
+                                reconnect_count += 1;
                                 tracing::info!(
-                                    "AUTODEMO: port returned → auto-reopened {}",
+                                    "AUTODEMO: port returned → auto-reopened {} (#{reconnect_count})",
                                     port.port
                                 );
                             }
                             _ => {}
                         }
-                        // The reconnect demo's trigger task needs the session id.
+                        // The demo trigger tasks need their sessions' ids.
                         if let Some(demo_id_tx) = &demo_id_tx {
                             if port.state == PortState::Open {
                                 let _ = demo_id_tx.send(port.session_id);

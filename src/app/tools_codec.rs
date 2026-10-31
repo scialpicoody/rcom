@@ -161,6 +161,10 @@ impl CodecPage {
         self.input_caption.set_text(Some(&t!("codec_input")));
         self.output_caption.set_text(Some(&t!("codec_output")));
         self.status.set_text(Some(&t!("codec_status_idle")));
+        // §4.1: one accent primary action; the empty state names the next
+        // action on the input surface itself (conversion is instant, no list
+        // to overlay).
+        super::ui_patterns::accent(&self.run);
         self.input.set_placeholder_text(Some(&t!("codec_input_hint")));
 
         self.op.set_selected_index(-1);
